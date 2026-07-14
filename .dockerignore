@@ -1,0 +1,5 @@
+console/apps/api/node_modules
+console/apps/web/node_modules
+console/apps/web/dist
+console/data
+*.log

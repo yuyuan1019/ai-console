@@ -1,0 +1,11 @@
+﻿node_modules/
+dist/
+data/
+*.db
+*.db-shm
+*.db-wal
+seed/
+windows-agent-enroll.ps1
+*.txt
+ai-agent.exe
+ai-agent

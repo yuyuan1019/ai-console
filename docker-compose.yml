@@ -1,0 +1,19 @@
+services:
+  ai-console:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "15150:3000"
+    environment:
+      NODE_ENV: ${NODE_ENV:-}
+      DB_PATH: /app/console/data/ai-console.db
+      MASTER_KEY: ${MASTER_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-}
+      BOOTSTRAP_ADMIN_USER: ${BOOTSTRAP_ADMIN_USER:-admin}
+      BOOTSTRAP_ADMIN_PASS: ${BOOTSTRAP_ADMIN_PASS}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    volumes:
+      - ai-console-data:/app/console/data
+
+volumes:
+  ai-console-data:
