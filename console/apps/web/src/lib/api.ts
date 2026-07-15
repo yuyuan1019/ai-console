@@ -47,6 +47,7 @@ export interface ProviderListItem {
   key_count: number
   model_count: number
   families: string[]
+  default_model_id: string | null
 }
 
 export interface ProviderKey {
@@ -76,6 +77,7 @@ export interface ProviderDetail {
   models_endpoint: string | null
   preset: string | null
   enabled: number
+  default_model_id: string | null
   keys: ProviderKey[]
   models: ProviderModel[]
   endpoints: { id: number; url: string }[]
@@ -164,6 +166,7 @@ export interface CreateProviderInput {
   models_endpoint?: string | null
   preset?: string | null
   enabled?: boolean
+  default_model_id?: string | null
 }
 
 export interface ImportProvidersResult {
@@ -207,6 +210,12 @@ export interface UpdateProviderKeyInput {
   api_format?: string | null
   enabled?: boolean
   api_key?: string
+}
+
+export interface KeyModelEntry {
+  provider_id: string
+  key_id: string
+  model_id: string
 }
 
 export interface ConfigPreview {
@@ -335,9 +344,9 @@ export const api = {
       method: "POST",
       body: JSON.stringify(modelId ? { model_id: modelId } : {}),
     }),
-  previewConfig: (input: { tool: string; provider_id: string; key_id: string; model_id: string }) =>
+  previewConfig: (input: { tool: string; provider_id: string; key_id: string; model_id: string } | { tool: string; keys: KeyModelEntry[] }) =>
     request<ConfigPreview>("/batch/preview", { method: "POST", body: JSON.stringify(input) }),
-  batchExecute: (input: { tool: string; server_ids: string[]; provider_id: string; key_id: string; model_id: string }) =>
+  batchExecute: (input: { tool: string; server_ids: string[]; provider_id: string; key_id: string; model_id: string } | { tool: string; server_ids: string[]; keys: KeyModelEntry[] }) =>
     request<{ id: string }>("/batch/execute", { method: "POST", body: JSON.stringify(input) }),
   batchStatus: (id: string) => request<BatchJob>(`/batch/${id}`),
   batchRollback: (id: string) => request<{ ok: true }>(`/batch/${id}/rollback`, { method: "POST", body: JSON.stringify({}) }),
@@ -368,7 +377,7 @@ export const api = {
   agentManifest: () => request<AgentManifest>("/agent/manifest"),
   setCredential: (id: string, input: { tool: string; provider_id: string; key_id: string }) =>
     request<AgentTask>(`/servers/${id}/credentials/set`, { method: "POST", body: JSON.stringify(input) }),
-  removeCredential: (id: string, input: { tool: string }) =>
+  removeCredential: (id: string, input: { tool: string; provider_id?: string; key_id?: string }) =>
     request<AgentTask>(`/servers/${id}/credentials/remove`, { method: "POST", body: JSON.stringify(input) }),
   upgradeAgent: (id: string) => request<AgentTask>(`/servers/${id}/agent/upgrade`, { method: "POST", body: JSON.stringify({}) }),
   upgradeTool: (id: string, input: { tool: string; version?: string }) =>

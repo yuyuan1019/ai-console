@@ -1,17 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import { useEffect } from "react"
 import { api } from "@/lib/api"
+import type { KeyModelEntry } from "@/lib/api"
 import { subscribe } from "@/lib/ws"
 
 export function usePreviewConfig() {
   return useMutation({
-    mutationFn: (input: { tool: string; provider_id: string; key_id: string; model_id: string }) => api.previewConfig(input),
+    mutationFn: (input: { tool: string; provider_id: string; key_id: string; model_id: string } | { tool: string; keys: KeyModelEntry[] }) => api.previewConfig(input),
   })
 }
 
 export function useBatchExecute() {
   return useMutation({
-    mutationFn: (input: { tool: string; server_ids: string[]; provider_id: string; key_id: string; model_id: string }) =>
+    mutationFn: (input: { tool: string; server_ids: string[]; provider_id: string; key_id: string; model_id: string } | { tool: string; server_ids: string[]; keys: KeyModelEntry[] }) =>
       api.batchExecute(input),
   })
 }

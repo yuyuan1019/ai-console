@@ -194,13 +194,16 @@ export function generateConfig(tool: string, opts: {
   api_format?: string | null
   raw_config_json?: string | null
   provider_name?: string | null
+  group_name?: string | null
 }): { content: string; format: string } {
   const baseUrl = opts.base_url.replace(/\/+$/, "")
   const openAiBaseUrl = withOpenAiV1(baseUrl)
   const apiKey = opts.api_key
   const model = opts.model
   const providerLabel = opts.provider_name || "provider"
-  const providerId = providerLabel.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
+  const groupLabel = opts.group_name ? `_${opts.group_name}` : ""
+  const rawId = `${providerLabel}${groupLabel}`
+  const providerId = rawId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
   let raw: any = null
   if (opts.raw_config_json) {
     try { raw = JSON.parse(opts.raw_config_json) } catch { raw = null }
@@ -247,17 +250,48 @@ export function generateConfig(tool: string, opts: {
   }
 
   if (tool === "opencode") {
-    const api = opts.api_format === "anthropic" ? "anthropic" : "openai"
-    const config: any = raw ? { ...raw } : {}
-    if (!config.provider) config.provider = {}
-    config.provider[providerId] = {
-      api,
-      options: { baseURL: openAiBaseUrl, apiKey },
-      models: { [model]: {} },
-    }
-    config.model = `${providerId}/${model}`
+    const config = buildOpenCodeConfig({ providerId, providerLabel, openAiBaseUrl, apiKey, model, apiFormat: opts.api_format, raw })
     return { content: JSON.stringify(config, null, 2), format: "json" }
   }
 
   return { content: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model }, null, 2), format: "json" }
+}
+
+export function buildOpenCodeConfig(entry: {
+  providerId: string
+  providerLabel: string
+  openAiBaseUrl: string
+  apiKey: string
+  model: string
+  apiFormat?: string | null
+  raw?: any
+}): any {
+  const api = entry.apiFormat === "anthropic" ? "anthropic" : "openai"
+  const config: any = entry.raw ? { ...entry.raw } : {}
+  if (!config.provider) config.provider = {}
+  config.provider[entry.providerId] = {
+    api,
+    options: { baseURL: entry.openAiBaseUrl, apiKey: entry.apiKey },
+    models: { [entry.model]: {} },
+  }
+  config.model = `${entry.providerId}/${entry.model}`
+  return config
+}
+
+export function mergeOpenCodeConfig(entries: {
+  providerId: string
+  providerLabel: string
+  openAiBaseUrl: string
+  apiKey: string
+  model: string
+  apiFormat?: string | null
+}[]): any {
+  const config: any = { provider: {} }
+  for (const entry of entries) {
+    const single = buildOpenCodeConfig(entry)
+    Object.assign(config.provider, single.provider)
+  }
+  const first = entries[0]
+  config.model = first ? `${first.providerId}/${first.model}` : ""
+  return config
 }

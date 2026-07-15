@@ -163,15 +163,17 @@ export function registerServersRoutes(app: FastifyInstance) {
     }
   )
 
-  app.post<{ Params: { id: string }; Body: { tool?: string } }>(
+  app.post<{ Params: { id: string }; Body: { tool?: string; provider_id?: string; key_id?: string } }>(
     "/api/servers/:id/credentials/remove",
     async (req, reply) => {
       const user = (req as any).auth as AuthUser
       const server = db.prepare("SELECT id FROM servers WHERE id=?").get(req.params.id)
       if (!server) return reply.code(404).send({ error: "not found" })
       const tool = String(req.body?.tool || "").trim()
+      const providerId = req.body?.provider_id ? String(req.body.provider_id).trim() : null
+      const keyId = req.body?.key_id ? String(req.body.key_id).trim() : null
       if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "unsupported tool for credential removal" })
-      return reply.code(201).send(createAgentTask(req.params.id, user.id, "remove_credential", { tool }))
+      return reply.code(201).send(createAgentTask(req.params.id, user.id, "remove_credential", { tool, provider_id: providerId, key_id: keyId }))
     }
   )
 

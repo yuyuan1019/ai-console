@@ -4,11 +4,19 @@ import { api } from "@/lib/api"
 import { subscribe } from "@/lib/ws"
 
 export function useServers() {
+  const queryClient = useQueryClient()
+  useEffect(() => {
+    return subscribe("servers:status", () => {
+      void queryClient.invalidateQueries({ queryKey: ["servers"] })
+    })
+  }, [queryClient])
   return useQuery({
     queryKey: ["servers"],
     queryFn: api.servers,
     staleTime: 0,
     refetchInterval: 10000,
+    refetchIntervalInBackground: true,
+    refetchOnMount: true,
   })
 }
 
@@ -138,7 +146,7 @@ export function useSetCredential(id: string | undefined) {
 export function useRemoveCredential(id: string | undefined) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (input: { tool: string }) => api.removeCredential(id!, input),
+    mutationFn: (input: { tool: string; provider_id?: string; key_id?: string }) => api.removeCredential(id!, input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["server", id, "tasks"] })
     },

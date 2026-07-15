@@ -24,6 +24,8 @@ AI Console solves this: deploy one console + install a lightweight agent on each
 | 凭据安全下发 | Push API keys to target machines (AES-256-GCM encrypted) |
 | 供应商与模型管理 | Centralize API providers, keys, and model catalogs |
 | 批量操作 | Apply config changes to multiple servers with dry-run preview |
+| OpenCode 多渠道下发 | Deploy multiple provider keys into one opencode.json for easy switching |
+| 供应商默认模型 | Set a default model per provider, auto-selected in config generation |
 | 操作审计 | Full audit trail with request ID correlation |
 
 ## 架构 / Architecture

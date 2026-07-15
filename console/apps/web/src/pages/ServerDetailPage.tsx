@@ -362,7 +362,7 @@ export function ServerDetailPage() {
                     disabled={removeCredential.isPending}
                     onClick={() => {
                       if (confirm(`从 ${server.name} 卸载 ${tool} 的 key？会删除 agent 上的凭据文件和已写入工具配置中的 key。`)) {
-                        removeCredential.mutate({ tool })
+                        removeCredential.mutate({ tool, provider_id: credProviderId || undefined, key_id: credKeyId || undefined })
                       }
                     }}
                   >

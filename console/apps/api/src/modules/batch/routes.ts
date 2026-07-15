@@ -2,24 +2,70 @@ import type { FastifyInstance } from "fastify"
 import crypto from "node:crypto"
 import { db } from "../../core/db"
 import { decrypt } from "../../core/crypto"
-import { generateConfig } from "../../core/config"
+import { generateConfig, mergeOpenCodeConfig, withOpenAiV1 } from "../../core/config"
 import { audit } from "../../core/audit"
 import { createAgentTask, broadcastEvent } from "../agent/routes"
 import type { AuthUser } from "../../core/constants"
 
 export function registerBatchRoutes(app: FastifyInstance) {
-  app.post<{ Body: { tool?: string; provider_id?: string; key_id?: string; model_id?: string } }>(
+  app.post<{ Body: { tool?: string; provider_id?: string; key_id?: string; model_id?: string; keys?: Array<{ provider_id?: string; key_id?: string; model_id?: string }> } }>(
     "/api/batch/preview",
     async (req, reply) => {
       const tool = String(req.body?.tool || "").trim()
-      const providerId = String(req.body?.provider_id || "").trim()
-      const keyId = String(req.body?.key_id || "").trim()
-      const modelId = String(req.body?.model_id || "").trim()
       if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
-      if (!providerId || !keyId || !modelId) return reply.code(400).send({ error: "provider_id, key_id, model_id are required" })
+
+      const keyEntries: Array<{ providerId: string; keyId: string; modelId: string }> = []
+      if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && tool === "opencode") {
+        for (const k of req.body!.keys) {
+          const pid = String(k?.provider_id || "").trim()
+          const kid = String(k?.key_id || "").trim()
+          const mid = String(k?.model_id || "").trim()
+          if (!pid || !kid || !mid) return reply.code(400).send({ error: "each key entry requires provider_id, key_id, model_id" })
+          keyEntries.push({ providerId: pid, keyId: kid, modelId: mid })
+        }
+      } else {
+        const providerId = String(req.body?.provider_id || "").trim()
+        const keyId = String(req.body?.key_id || "").trim()
+        const modelId = String(req.body?.model_id || "").trim()
+        if (!providerId || !keyId || !modelId) return reply.code(400).send({ error: "provider_id, key_id, model_id are required" })
+        keyEntries.push({ providerId, keyId, modelId })
+      }
+
+      if (tool === "opencode" && keyEntries.length > 1) {
+        const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; apiFormat?: string | null }> = []
+        for (const ke of keyEntries) {
+          const key = db
+            .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.group_name, p.base_url, p.name AS provider_name
+                       FROM provider_keys k JOIN providers p ON p.id=k.provider_id
+                       WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
+            .get(ke.keyId, ke.providerId) as any
+          if (!key) return reply.code(404).send({ error: `key ${ke.keyId} not found` })
+          if (key.auth_type !== "apikey" || !key.encrypted_value) return reply.code(400).send({ error: "oauth key has no secret" })
+          const secret = decrypt(key.encrypted_value, key.iv)
+          if (!secret) return reply.code(400).send({ error: "decrypt failed" })
+          const baseUrl = String(key.base_url || "").replace(/\/+$/, "")
+          const providerLabel = key.provider_name || "provider"
+          const groupLabel = key.group_name ? `_${key.group_name}` : ""
+          const providerId = `${providerLabel}${groupLabel}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
+          entries.push({
+            providerId, providerLabel,
+            openAiBaseUrl: withOpenAiV1(baseUrl),
+            apiKey: secret,
+            model: ke.modelId,
+            apiFormat: key.api_format,
+          })
+        }
+        const merged = mergeOpenCodeConfig(entries)
+        return { tool, model: merged.model, content: JSON.stringify(merged, null, 2), format: "json" }
+      }
+
+      const ke = keyEntries[0]
+      const providerId = ke.providerId
+      const keyId = ke.keyId
+      const modelId = ke.modelId
 
       const key = db
-        .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.auth_type, k.raw_config_json,
+        .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.auth_type, k.raw_config_json, k.group_name,
                   p.base_url, p.name AS provider_name
            FROM provider_keys k JOIN providers p ON p.id=k.provider_id
            WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
@@ -37,6 +83,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
         api_format: key.api_format,
         raw_config_json: key.raw_config_json,
         provider_name: key.provider_name,
+        group_name: key.group_name,
       })
       return { tool, model: modelId, content: result.content, format: result.format }
     }
@@ -49,6 +96,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
       provider_id?: string
       key_id?: string
       model_id?: string
+      keys?: Array<{ provider_id?: string; key_id?: string; model_id?: string }>
     }
   }>("/api/batch/execute", async (req, reply) => {
     const user = (req as any).auth as AuthUser
@@ -57,27 +105,78 @@ export function registerBatchRoutes(app: FastifyInstance) {
     if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
     if (serverIds.length === 0) return reply.code(400).send({ error: "server_ids required" })
 
-    const providerId = String(req.body?.provider_id || "").trim()
-    const keyId = String(req.body?.key_id || "").trim()
-    const modelId = String(req.body?.model_id || "").trim()
-    if (!providerId || !keyId || !modelId) return reply.code(400).send({ error: "provider_id, key_id and model_id are required" })
+    const keyEntries: Array<{ providerId: string; keyId: string; modelId: string }> = []
+    if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && tool === "opencode") {
+      for (const k of req.body!.keys) {
+        const pid = String(k?.provider_id || "").trim()
+        const kid = String(k?.key_id || "").trim()
+        const mid = String(k?.model_id || "").trim()
+        if (!pid || !kid || !mid) return reply.code(400).send({ error: "each key entry requires provider_id, key_id, model_id" })
+        keyEntries.push({ providerId: pid, keyId: kid, modelId: mid })
+      }
+    } else {
+      const providerId = String(req.body?.provider_id || "").trim()
+      const keyId = String(req.body?.key_id || "").trim()
+      const modelId = String(req.body?.model_id || "").trim()
+      if (!providerId || !keyId || !modelId) return reply.code(400).send({ error: "provider_id, key_id and model_id are required" })
+      keyEntries.push({ providerId, keyId, modelId })
+    }
 
-    const key = db
-      .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.raw_config_json, p.base_url, p.name AS provider_name
-                FROM provider_keys k JOIN providers p ON p.id=k.provider_id
-                WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
-      .get(keyId, providerId) as any
-    if (!key) return reply.code(404).send({ error: "key not found" })
-    const secret = decrypt(key.encrypted_value, key.iv)
-    if (!secret) return reply.code(400).send({ error: "decrypt failed" })
-    const generated = generateConfig(tool, {
-      base_url: key.base_url || "", api_key: secret, model: modelId,
-      api_format: key.api_format, raw_config_json: key.raw_config_json,
-      provider_name: key.provider_name,
-    })
-    const content = generated.content
-    const format = generated.format
-    const sourceRef = `${providerId}/${keyId}/${modelId}`
+    let content: string
+    let format: string
+    let sourceRef: string
+
+    if (tool === "opencode" && keyEntries.length > 1) {
+      const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; apiFormat?: string | null }> = []
+      for (const ke of keyEntries) {
+        const key = db
+          .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.group_name, p.base_url, p.name AS provider_name
+                     FROM provider_keys k JOIN providers p ON p.id=k.provider_id
+                     WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
+          .get(ke.keyId, ke.providerId) as any
+        if (!key) return reply.code(404).send({ error: `key ${ke.keyId} not found` })
+        const secret = decrypt(key.encrypted_value, key.iv)
+        if (!secret) return reply.code(400).send({ error: "decrypt failed" })
+        const baseUrl = String(key.base_url || "").replace(/\/+$/, "")
+        const providerLabel = key.provider_name || "provider"
+        const groupLabel = key.group_name ? `_${key.group_name}` : ""
+        const providerId = `${providerLabel}${groupLabel}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
+        entries.push({
+          providerId, providerLabel,
+          openAiBaseUrl: withOpenAiV1(baseUrl),
+          apiKey: secret,
+          model: ke.modelId,
+          apiFormat: key.api_format,
+        })
+      }
+      const merged = mergeOpenCodeConfig(entries)
+      content = JSON.stringify(merged, null, 2)
+      format = "json"
+      sourceRef = keyEntries.map((ke) => `${ke.providerId}/${ke.keyId}/${ke.modelId}`).join(",")
+    } else {
+      const ke = keyEntries[0]
+      const providerId = ke.providerId
+      const keyId = ke.keyId
+      const modelId = ke.modelId
+
+      const key = db
+        .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.raw_config_json, k.group_name, p.base_url, p.name AS provider_name
+                  FROM provider_keys k JOIN providers p ON p.id=k.provider_id
+                  WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
+        .get(keyId, providerId) as any
+      if (!key) return reply.code(404).send({ error: "key not found" })
+      const secret = decrypt(key.encrypted_value, key.iv)
+      if (!secret) return reply.code(400).send({ error: "decrypt failed" })
+      const generated = generateConfig(tool, {
+        base_url: key.base_url || "", api_key: secret, model: modelId,
+        api_format: key.api_format, raw_config_json: key.raw_config_json,
+        provider_name: key.provider_name,
+        group_name: key.group_name,
+      })
+      content = generated.content
+      format = generated.format
+      sourceRef = `${providerId}/${keyId}/${modelId}`
+    }
 
     const batchId = crypto.randomUUID()
     const now = Date.now()

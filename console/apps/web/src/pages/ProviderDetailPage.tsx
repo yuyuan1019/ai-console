@@ -35,6 +35,7 @@ export function ProviderDetailPage() {
   const [providerModelsEndpoint, setProviderModelsEndpoint] = useState("/v1/models")
   const [providerPreset, setProviderPreset] = useState("custom")
   const [providerEnabled, setProviderEnabled] = useState(true)
+  const [providerDefaultModel, setProviderDefaultModel] = useState("")
   const [providerError, setProviderError] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [label, setLabel] = useState("")
@@ -59,6 +60,7 @@ export function ProviderDetailPage() {
     setProviderModelsEndpoint(provider.models_endpoint || "/v1/models")
     setProviderPreset(provider.preset || "custom")
     setProviderEnabled(Boolean(provider.enabled))
+    setProviderDefaultModel(provider.default_model_id || "")
   }, [provider])
 
   const addKey = (e: FormEvent) => {
@@ -67,7 +69,7 @@ export function ProviderDetailPage() {
   }
   const saveProvider = (e: FormEvent) => {
     e.preventDefault(); setProviderError(null)
-    updateProvider.mutate({ name: providerName, base_url: providerBaseUrl || null, models_endpoint: providerModelsEndpoint, preset: providerPreset, enabled: providerEnabled }, { onSuccess: () => setShowSettings(false), onError: (err) => setProviderError(String(err)) })
+    updateProvider.mutate({ name: providerName, base_url: providerBaseUrl || null, models_endpoint: providerModelsEndpoint, preset: providerPreset, enabled: providerEnabled, default_model_id: providerDefaultModel || null }, { onSuccess: () => setShowSettings(false), onError: (err) => setProviderError(String(err)) })
   }
   const startEditKey = (k: NonNullable<typeof provider>["keys"][number]) => { setEditingKeyId(k.id); setKeyLabel(k.label); setKeyGroupName(k.group_name || ""); setKeyFamily(k.family); setKeyApiFormat(k.api_format || ""); setKeyApiKey("") }
   const saveKey = (keyId: string) => { updateKey.mutate({ keyId, input: { label: keyLabel, group_name: keyGroupName || null, family: keyFamily, api_format: keyApiFormat || null, api_key: keyApiKey || undefined } }, { onSuccess: () => setEditingKeyId(null) }) }
@@ -92,6 +94,10 @@ export function ProviderDetailPage() {
               <Input className="h-9 w-32 text-xs" value={providerModelsEndpoint} onChange={(e) => setProviderModelsEndpoint(e.target.value)} />
               <Input className="h-9 w-24 text-xs" value={providerPreset} onChange={(e) => setProviderPreset(e.target.value)} />
               <label className="flex h-9 cursor-pointer items-center gap-1 text-xs text-muted-foreground"><input type="checkbox" checked={providerEnabled} onChange={(e) => setProviderEnabled(e.target.checked)} /> 启用</label>
+              <select value={providerDefaultModel} onChange={(e) => setProviderDefaultModel(e.target.value)} className="h-9 w-48 rounded-md border border-input bg-background px-2 text-xs">
+                <option value="">默认模型（可选）</option>
+                {provider.models.map((m) => (<option key={m.model_id} value={m.model_id}>{m.model_id}</option>))}
+              </select>
               <Button className="h-9 text-xs" type="submit" disabled={updateProvider.isPending}>{updateProvider.isPending ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-1 h-3.5 w-3.5" />}保存</Button>
             </form>
             {providerError && <p className="mt-2 text-xs text-destructive">{providerError}</p>}

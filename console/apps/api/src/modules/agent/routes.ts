@@ -60,6 +60,7 @@ export function handleHeartbeat(serverId: string, body: { status?: string; host?
        ON CONFLICT(server_id,name) DO UPDATE SET installed=excluded.installed,version=excluded.version,path=excluded.path,detected_at=excluded.detected_at`
     ).run(serverId, toolName, tool.installed === false || tool.installed === 0 ? 0 : 1, tool.version || null, tool.path || null, now)
   }
+  broadcastEvent("servers:status", { server_id: serverId, status: body.status || "online", last_seen: now })
 }
 
 export function handleTaskResult(serverId: string, taskId: string, body: { ok?: boolean; result?: any; error?: string }): boolean {
@@ -150,6 +151,18 @@ function broadcastBatchProgressForTask(taskId: string) {
 
 function materializeTaskPayload(action: string, payloadJson: string) {
   const payload = JSON.parse(payloadJson || "{}")
+
+  if (action === "remove_credential") {
+    const tool = String(payload.tool || "").trim()
+    const providerId = payload.provider_id ? String(payload.provider_id).trim() : null
+    const keyId = payload.key_id ? String(payload.key_id).trim() : null
+    const envKeys: string[] = []
+    if (tool === "claude") envKeys.push("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")
+    else if (tool === "codex") envKeys.push("OPENAI_API_KEY", "OPENAI_BASE_URL")
+    else if (tool === "gemini") envKeys.push("GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL")
+    return { tool, provider_id: providerId, key_id: keyId, env_keys_to_remove: envKeys }
+  }
+
   if (action !== "set_credential") return payload
 
   const tool = String(payload.tool || "").trim()
@@ -184,11 +197,15 @@ function materializeTaskPayload(action: string, payloadJson: string) {
     const apiFormat = key.api_format === "anthropic" ? "anthropic" : "openai"
     const models = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND key_id=?").all(providerId, keyId) as any[])
       .map((m) => String(m.model_id))
+    const providerLabel = String(key.provider_name || "").trim()
+    const groupLabel = key.group_name ? `_${String(key.group_name).trim()}` : ""
+    const providerSid = `${providerLabel}${groupLabel}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
     credentials["apiKey"] = secret
     credentials["baseURL"] = withOpenAiV1(baseUrl)
     credentials["api_format"] = apiFormat
-    credentials["provider_name"] = String(key.provider_name || "").trim()
+    credentials["provider_name"] = providerLabel
     credentials["group_name"] = String(key.group_name || "").trim()
+    credentials["provider_id"] = providerSid
     credentials["models"] = JSON.stringify(models)
   }
   return { tool, credentials }

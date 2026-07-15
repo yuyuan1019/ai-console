@@ -1,18 +1,18 @@
 import { useState } from "react"
-import { CheckCircle2, ChevronRight, Loader2, Rocket, RotateCcw, XCircle, Eye } from "lucide-react"
+import { CheckCircle2, ChevronRight, Loader2, Rocket, RotateCcw, XCircle, Eye, X, Plus } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { useServers } from "@/hooks/useServers"
 import { useProviders, useProvider } from "@/hooks/useProviders"
 import { usePreviewConfig, useBatchExecute, useBatchStatus, useBatchRollback } from "@/hooks/useBatch"
-import type { ConfigPreview } from "@/lib/api"
+import type { ConfigPreview, KeyModelEntry } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
 const TOOLS = [
   { key: "codex", label: "Codex", desc: "OpenAI Codex CLI" },
   { key: "claude", label: "Claude Code", desc: "Anthropic Claude" },
   { key: "gemini", label: "Gemini", desc: "Google Gemini CLI" },
-  { key: "opencode", label: "OpenCode", desc: "OpenCode editor" },
+  { key: "opencode", label: "OpenCode", desc: "OpenCode editor · 支持多渠道" },
 ]
 
 export function BatchPage() {
@@ -21,6 +21,7 @@ export function BatchPage() {
   const [providerId, setProviderId] = useState("")
   const [keyId, setKeyId] = useState("")
   const [modelId, setModelId] = useState("")
+  const [selectedKeys, setSelectedKeys] = useState<KeyModelEntry[]>([])
   const [preview, setPreview] = useState<ConfigPreview | null>(null)
   const [selectedServers, setSelectedServers] = useState<Set<string>>(new Set())
   const [batchId, setBatchId] = useState<string | null>(null)
@@ -33,11 +34,13 @@ export function BatchPage() {
   const { data: batchStatus } = useBatchStatus(batchId)
   const rollbackMut = useBatchRollback()
 
-  const eligibleServers = servers.filter((s) => s.status === "online" && s.tools.includes(tool))
+  const eligibleServers = servers.filter((s) => s.status === "online" && (tool === "opencode" ? s.tools.some((t) => t === "opencode" || t === "codex") : s.tools.includes(tool)))
 
   function generatePreview() {
     setPreview(null)
-    if (providerId && keyId && modelId) {
+    if (tool === "opencode" && selectedKeys.length > 1) {
+      previewMut.mutate({ tool, keys: selectedKeys }, { onSuccess: setPreview })
+    } else if (providerId && keyId && modelId) {
       previewMut.mutate({ tool, provider_id: providerId, key_id: keyId, model_id: modelId }, { onSuccess: setPreview })
     }
   }
@@ -53,10 +56,17 @@ export function BatchPage() {
 
   function doExecute() {
     if (!confirm(`确认下发 ${tool} 配置到 ${selectedServers.size} 台机器？每台机器会先备份当前配置。`)) return
-    executeMut.mutate(
-      { tool, server_ids: [...selectedServers], provider_id: providerId, key_id: keyId, model_id: modelId },
-      { onSuccess: (r) => { setBatchId(r.id); setStep(4) } }
-    )
+    if (tool === "opencode" && selectedKeys.length > 1) {
+      executeMut.mutate(
+        { tool, server_ids: [...selectedServers], keys: selectedKeys },
+        { onSuccess: (r) => { setBatchId(r.id); setStep(4) } }
+      )
+    } else {
+      executeMut.mutate(
+        { tool, server_ids: [...selectedServers], provider_id: providerId, key_id: keyId, model_id: modelId },
+        { onSuccess: (r) => { setBatchId(r.id); setStep(4) } }
+      )
+    }
   }
 
   function doRollback() {
@@ -65,7 +75,22 @@ export function BatchPage() {
     rollbackMut.mutate(batchId, { onSuccess: () => alert("回滚任务已创建，agent 将在下次心跳时执行。") })
   }
 
-  const canPreview = !!providerId && !!keyId && !!modelId
+  const canPreview = (tool === "opencode" && selectedKeys.length > 0) || (!!providerId && !!keyId && !!modelId)
+
+  function addKeyEntry() {
+    if (!providerId || !keyId || !modelId) return
+    if (selectedKeys.some((k) => k.key_id === keyId)) return
+    const entry: KeyModelEntry = { provider_id: providerId, key_id: keyId, model_id: modelId }
+    setSelectedKeys([...selectedKeys, entry])
+    setKeyId("")
+    setModelId("")
+  }
+  function removeKeyEntry(keyId: string) {
+    setSelectedKeys(selectedKeys.filter((k) => k.key_id !== keyId))
+  }
+
+  const availableProviderKeys = providerDetail?.keys.filter((k) => k.enabled === 1 && !selectedKeys.some((sk) => sk.key_id === k.id)) || []
+  const multiKey = tool === "opencode" && selectedKeys.length > 0
   const allDone = batchStatus?.progress?.every((p) => p.state === "done" || p.state === "failed")
 
   return (
@@ -92,7 +117,7 @@ export function BatchPage() {
           {TOOLS.map((t) => (
             <button
               key={t.key}
-              onClick={() => { setTool(t.key); setStep(2); setPreview(null); setProviderId(""); setKeyId(""); setModelId("") }}
+              onClick={() => { setTool(t.key); setStep(2); setPreview(null); setProviderId(""); setKeyId(""); setModelId(""); setSelectedKeys([]) }}
               className="rounded-lg border border-border bg-card p-4 text-left transition-colors hover:border-primary/50 hover:bg-accent/50"
             >
               <div className="text-base font-semibold">{t.label}</div>
@@ -104,29 +129,87 @@ export function BatchPage() {
 
       {step === 2 && (
         <div className="space-y-4">
-          <div className="grid gap-3 md:grid-cols-3 max-w-2xl">
-            <div className="space-y-1">
-              <span className="text-xs font-medium text-muted-foreground">供应商</span>
-              <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setKeyId(""); setModelId(""); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
-                <option value="">选择供应商…</option>
-                {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
-              </select>
+          {!multiKey && (
+            <div className="grid gap-3 md:grid-cols-3 max-w-2xl">
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">供应商</span>
+                <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setKeyId(""); setModelId(""); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm">
+                  <option value="">选择供应商…</option>
+                  {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">Key</span>
+                <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
+                  <option value="">选择 Key…</option>
+                  {(providerDetail?.keys || []).filter((k) => k.enabled === 1).map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+                </select>
+              </div>
+              <div className="space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">模型</span>
+                <select value={modelId} onChange={(e) => { setModelId(e.target.value); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
+                  <option value="">选择模型…</option>
+                  {providerDetail?.models.map((m) => <option key={m.id} value={m.model_id}>{m.model_id}</option>)}
+                </select>
+              </div>
             </div>
-            <div className="space-y-1">
-              <span className="text-xs font-medium text-muted-foreground">Key</span>
-              <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
-                <option value="">选择 Key…</option>
-                {providerDetail?.keys.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
-              </select>
+          )}
+
+          {tool === "opencode" && !multiKey && (
+            <Button size="sm" variant="outline" disabled={!providerId || !keyId || !modelId} onClick={() => { addKeyEntry(); setProviderId(""); setKeyId(""); setModelId(""); setPreview(null) }}>
+              <Plus className="mr-1 h-3.5 w-3.5" /> 添加为渠道
+            </Button>
+          )}
+
+          {tool === "opencode" && multiKey && (
+            <div className="space-y-3 max-w-2xl">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium">已选渠道 ({selectedKeys.length})</span>
+                <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => { setSelectedKeys([]); setPreview(null) }}>清空</Button>
+              </div>
+              {selectedKeys.map((entry) => {
+                const p = providers.find((x) => x.id === entry.provider_id)
+                const k = providerDetail?.keys.find((x) => x.id === entry.key_id) || (p ? undefined : undefined)
+                const label = k?.label || entry.key_id
+                return (
+                  <div key={entry.key_id} className="flex items-center gap-3 rounded-lg border border-border bg-card p-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2 text-sm">
+                        <span className="font-medium">{p?.name || entry.provider_id}</span>
+                        <span className="text-muted-foreground">/ {label}</span>
+                        <Badge variant="secondary" className="text-[10px]">{entry.model_id}</Badge>
+                      </div>
+                    </div>
+                    <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive" onClick={() => { removeKeyEntry(entry.key_id); setPreview(null) }}>
+                      <X className="mr-1 h-3 w-3" /> 移除
+                    </Button>
+                  </div>
+                )
+              })}
+              {availableProviderKeys.length > 0 && (
+                <div className="rounded-lg border border-dashed border-border p-3 space-y-2">
+                  <span className="text-xs font-medium text-muted-foreground">添加更多渠道</span>
+                  <div className="flex flex-wrap gap-2 items-end">
+                    <select value={providerId} onChange={(e) => { setProviderId(e.target.value); setKeyId(""); setModelId(""); setPreview(null) }} className="h-9 w-36 rounded-md border border-input bg-background px-2 text-xs">
+                      <option value="">供应商</option>
+                      {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                    </select>
+                    <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setPreview(null) }} className="h-9 w-40 rounded-md border border-input bg-background px-2 text-xs" disabled={!availableProviderKeys.length && !providerDetail}>
+                      <option value="">Key</option>
+                      {availableProviderKeys.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+                    </select>
+                    <select value={modelId} onChange={(e) => setModelId(e.target.value)} className="h-9 w-48 rounded-md border border-input bg-background px-2 text-xs" disabled={!providerDetail}>
+                      <option value="">模型</option>
+                      {providerDetail?.models.map((m) => <option key={m.id} value={m.model_id}>{m.model_id}</option>)}
+                    </select>
+                    <Button size="sm" variant="outline" disabled={!providerId || !keyId || !modelId} onClick={() => { addKeyEntry(); setProviderId(""); setKeyId(""); setModelId(""); setPreview(null) }}>
+                      <Plus className="mr-1 h-3.5 w-3.5" /> 添加
+                    </Button>
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="space-y-1">
-              <span className="text-xs font-medium text-muted-foreground">模型</span>
-              <select value={modelId} onChange={(e) => { setModelId(e.target.value); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
-                <option value="">选择模型…</option>
-                {providerDetail?.models.map((m) => <option key={m.id} value={m.model_id}>{m.model_id}</option>)}
-              </select>
-            </div>
-          </div>
+          )}
 
           <div className="flex items-center gap-2">
             <Button size="sm" variant="outline" disabled={!canPreview || previewMut.isPending} onClick={generatePreview}>

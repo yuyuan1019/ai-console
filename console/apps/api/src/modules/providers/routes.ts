@@ -10,7 +10,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
   app.get("/api/providers", () => {
     return db
       .prepare(
-        `SELECT p.id, p.name, p.base_url, p.preset, p.enabled,
+        `SELECT p.id, p.name, p.base_url, p.preset, p.enabled, p.default_model_id,
                 (SELECT COUNT(*) FROM provider_keys k WHERE k.provider_id=p.id AND k.enabled=1) AS key_count,
                 (SELECT COUNT(*) FROM models m WHERE m.provider_id=p.id) AS model_count,
                 (SELECT GROUP_CONCAT(DISTINCT k.family) FROM provider_keys k WHERE k.provider_id=p.id AND k.enabled=1) AS families_csv
@@ -56,7 +56,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
 
     const provider = db
       .prepare(
-        `SELECT p.id, p.name, p.base_url, p.preset, p.enabled,
+        `SELECT p.id, p.name, p.base_url, p.preset, p.enabled, p.default_model_id,
                  0 AS key_count,
                  0 AS model_count
          FROM providers p WHERE p.id=?`
@@ -218,11 +218,12 @@ export function registerProvidersRoutes(app: FastifyInstance) {
       models_endpoint?: string | null
       preset?: string | null
       enabled?: boolean | number
+      default_model_id?: string | null
     }
   }>("/api/providers/:id", async (req, reply) => {
     const user = (req as any).auth as AuthUser
     const before = db
-      .prepare("SELECT id,name,base_url,models_endpoint,preset,enabled FROM providers WHERE id=?")
+      .prepare("SELECT id,name,base_url,models_endpoint,preset,enabled,default_model_id FROM providers WHERE id=?")
       .get(req.params.id)
     if (!before) return reply.code(404).send({ error: "not found" })
 
@@ -231,6 +232,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
     const modelsEndpoint = String(req.body?.models_endpoint || "/v1/models").trim() || "/v1/models"
     const preset = req.body?.preset ? String(req.body.preset).trim() : "custom"
     const enabled = req.body?.enabled === false || req.body?.enabled === 0 ? 0 : 1
+    const defaultModelId = req.body?.default_model_id ? String(req.body.default_model_id).trim() : null
     if (!name) return reply.code(400).send({ error: "name is required" })
     if (baseUrl && !/^https?:\/\//i.test(baseUrl)) {
       return reply.code(400).send({ error: "base_url must start with http:// or https://" })
@@ -239,16 +241,17 @@ export function registerProvidersRoutes(app: FastifyInstance) {
       return reply.code(400).send({ error: "models_endpoint must start with /" })
     }
 
-    db.prepare("UPDATE providers SET name=?, base_url=?, models_endpoint=?, preset=?, enabled=? WHERE id=?").run(
+    db.prepare("UPDATE providers SET name=?, base_url=?, models_endpoint=?, preset=?, enabled=?, default_model_id=? WHERE id=?").run(
       name,
       baseUrl,
       modelsEndpoint,
       preset,
       enabled,
+      defaultModelId,
       req.params.id
     )
     const after = db
-      .prepare("SELECT id,name,base_url,models_endpoint,preset,enabled FROM providers WHERE id=?")
+      .prepare("SELECT id,name,base_url,models_endpoint,preset,enabled,default_model_id FROM providers WHERE id=?")
       .get(req.params.id)
     audit(user.id, "provider.update", `provider:${req.params.id}`, before, after)
     return after
@@ -257,7 +260,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
   app.get<{ Params: { id: string } }>("/api/providers/:id", async (req, reply) => {
     const p = db
       .prepare(
-        "SELECT id,name,base_url,models_endpoint,preset,enabled FROM providers WHERE id=?"
+        "SELECT id,name,base_url,models_endpoint,preset,enabled,default_model_id FROM providers WHERE id=?"
       )
       .get(req.params.id) as any
     if (!p) return reply.code(404).send({ error: "not found" })
