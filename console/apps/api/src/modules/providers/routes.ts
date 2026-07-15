@@ -483,7 +483,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
           }
         }
         removed = (db.prepare(
-          "UPDATE models SET enabled=0 WHERE provider_id=? AND key_id=? AND enabled=1 AND fetched_at != ?"
+          "DELETE FROM models WHERE provider_id=? AND key_id=? AND fetched_at != ?"
         ).run(req.params.id, req.params.keyId, now) as any).changes
         db.prepare("UPDATE provider_keys SET last_models_refresh=? WHERE id=?").run(now, req.params.keyId)
         audit(user.id, "provider_key.refresh_models", `provider_key:${req.params.keyId}`, null, {
