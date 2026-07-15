@@ -81,7 +81,6 @@ CREATE TABLE IF NOT EXISTS providers (
   models_endpoint TEXT DEFAULT '/v1/models',
   preset TEXT,                                 -- one-api|openai|anthropic|custom|ccswitch
   enabled INTEGER NOT NULL DEFAULT 1,
-  default_model_id TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS provider_keys (
@@ -94,6 +93,7 @@ CREATE TABLE IF NOT EXISTS provider_keys (
   raw_config_json TEXT,                        -- 原始 settings_config, 供精确还原下发
   enabled INTEGER NOT NULL DEFAULT 1,
   last_models_refresh INTEGER,
+  default_model_id TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS provider_endpoints (

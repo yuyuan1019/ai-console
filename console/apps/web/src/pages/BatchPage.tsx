@@ -80,13 +80,18 @@ export function BatchPage() {
   function addKeyEntry() {
     if (!providerId || !keyId || !modelId) return
     if (selectedKeys.some((k) => k.key_id === keyId)) return
-    const entry: KeyModelEntry = { provider_id: providerId, key_id: keyId, model_id: modelId }
+    const entry: KeyModelEntry = { provider_id: providerId, key_id: keyId, model_id: modelId, primary: selectedKeys.length === 0 }
     setSelectedKeys([...selectedKeys, entry])
     setKeyId("")
     setModelId("")
   }
   function removeKeyEntry(keyId: string) {
-    setSelectedKeys(selectedKeys.filter((k) => k.key_id !== keyId))
+    const next = selectedKeys.filter((k) => k.key_id !== keyId)
+    if (next.length > 0 && !next.some((k) => k.primary)) next[0] = { ...next[0], primary: true }
+    setSelectedKeys(next)
+  }
+  function setPrimaryKey(keyId: string) {
+    setSelectedKeys(selectedKeys.map((k) => ({ ...k, primary: k.key_id === keyId })))
   }
 
   const availableProviderKeys = providerDetail?.keys.filter((k) => k.enabled === 1 && !selectedKeys.some((sk) => sk.key_id === k.id)) || []
@@ -178,8 +183,12 @@ export function BatchPage() {
                         <span className="font-medium">{p?.name || entry.provider_id}</span>
                         <span className="text-muted-foreground">/ {label}</span>
                         <Badge variant="secondary" className="text-[10px]">{entry.model_id}</Badge>
+                        {entry.primary && <Badge className="text-[10px] bg-amber-900/30 text-amber-400 border-amber-700/30">优先模型</Badge>}
                       </div>
                     </div>
+                    <Button size="sm" variant={entry.primary ? "secondary" : "outline"} className="h-7 text-xs" disabled={entry.primary} onClick={() => { setPrimaryKey(entry.key_id); setPreview(null) }}>
+                      {entry.primary ? "主" : "设为优先"}
+                    </Button>
                     <Button size="sm" variant="ghost" className="h-7 text-xs text-destructive" onClick={() => { removeKeyEntry(entry.key_id); setPreview(null) }}>
                       <X className="mr-1 h-3 w-3" /> 移除
                     </Button>

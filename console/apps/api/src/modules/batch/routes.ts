@@ -8,20 +8,20 @@ import { createAgentTask, broadcastEvent } from "../agent/routes"
 import type { AuthUser } from "../../core/constants"
 
 export function registerBatchRoutes(app: FastifyInstance) {
-  app.post<{ Body: { tool?: string; provider_id?: string; key_id?: string; model_id?: string; keys?: Array<{ provider_id?: string; key_id?: string; model_id?: string }> } }>(
+  app.post<{ Body: { tool?: string; provider_id?: string; key_id?: string; model_id?: string; keys?: Array<{ provider_id?: string; key_id?: string; model_id?: string; primary?: boolean }> } }>(
     "/api/batch/preview",
     async (req, reply) => {
       const tool = String(req.body?.tool || "").trim()
       if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
 
-      const keyEntries: Array<{ providerId: string; keyId: string; modelId: string }> = []
+      const keyEntries: Array<{ providerId: string; keyId: string; modelId: string; primary?: boolean }> = []
       if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && tool === "opencode") {
         for (const k of req.body!.keys) {
           const pid = String(k?.provider_id || "").trim()
           const kid = String(k?.key_id || "").trim()
           const mid = String(k?.model_id || "").trim()
           if (!pid || !kid || !mid) return reply.code(400).send({ error: "each key entry requires provider_id, key_id, model_id" })
-          keyEntries.push({ providerId: pid, keyId: kid, modelId: mid })
+          keyEntries.push({ providerId: pid, keyId: kid, modelId: mid, primary: Boolean(k?.primary) })
         }
       } else {
         const providerId = String(req.body?.provider_id || "").trim()
@@ -32,8 +32,9 @@ export function registerBatchRoutes(app: FastifyInstance) {
       }
 
       if (tool === "opencode" && keyEntries.length > 1) {
+        const sorted = [...keyEntries].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0))
         const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; apiFormat?: string | null }> = []
-        for (const ke of keyEntries) {
+        for (const ke of sorted) {
           const key = db
             .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.group_name, p.base_url, p.name AS provider_name
                        FROM provider_keys k JOIN providers p ON p.id=k.provider_id
@@ -96,7 +97,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
       provider_id?: string
       key_id?: string
       model_id?: string
-      keys?: Array<{ provider_id?: string; key_id?: string; model_id?: string }>
+      keys?: Array<{ provider_id?: string; key_id?: string; model_id?: string; primary?: boolean }>
     }
   }>("/api/batch/execute", async (req, reply) => {
     const user = (req as any).auth as AuthUser
@@ -105,14 +106,14 @@ export function registerBatchRoutes(app: FastifyInstance) {
     if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
     if (serverIds.length === 0) return reply.code(400).send({ error: "server_ids required" })
 
-    const keyEntries: Array<{ providerId: string; keyId: string; modelId: string }> = []
+    const keyEntries: Array<{ providerId: string; keyId: string; modelId: string; primary?: boolean }> = []
     if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && tool === "opencode") {
       for (const k of req.body!.keys) {
         const pid = String(k?.provider_id || "").trim()
         const kid = String(k?.key_id || "").trim()
         const mid = String(k?.model_id || "").trim()
         if (!pid || !kid || !mid) return reply.code(400).send({ error: "each key entry requires provider_id, key_id, model_id" })
-        keyEntries.push({ providerId: pid, keyId: kid, modelId: mid })
+        keyEntries.push({ providerId: pid, keyId: kid, modelId: mid, primary: Boolean(k?.primary) })
       }
     } else {
       const providerId = String(req.body?.provider_id || "").trim()
@@ -127,8 +128,9 @@ export function registerBatchRoutes(app: FastifyInstance) {
     let sourceRef: string
 
     if (tool === "opencode" && keyEntries.length > 1) {
+      const sorted = [...keyEntries].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0))
       const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; apiFormat?: string | null }> = []
-      for (const ke of keyEntries) {
+      for (const ke of sorted) {
         const key = db
           .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.group_name, p.base_url, p.name AS provider_name
                      FROM provider_keys k JOIN providers p ON p.id=k.provider_id

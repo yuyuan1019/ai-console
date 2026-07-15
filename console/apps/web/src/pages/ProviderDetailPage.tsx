@@ -35,7 +35,6 @@ export function ProviderDetailPage() {
   const [providerModelsEndpoint, setProviderModelsEndpoint] = useState("/v1/models")
   const [providerPreset, setProviderPreset] = useState("custom")
   const [providerEnabled, setProviderEnabled] = useState(true)
-  const [providerDefaultModel, setProviderDefaultModel] = useState("")
   const [providerError, setProviderError] = useState<string | null>(null)
   const [showSettings, setShowSettings] = useState(false)
   const [label, setLabel] = useState("")
@@ -50,6 +49,7 @@ export function ProviderDetailPage() {
   const [keyFamily, setKeyFamily] = useState("mixed")
   const [keyApiFormat, setKeyApiFormat] = useState("")
   const [keyApiKey, setKeyApiKey] = useState("")
+  const [keyDefaultModel, setKeyDefaultModel] = useState("")
   const [selectedModels, setSelectedModels] = useState<Record<string, string>>({})
   const provider = data
 
@@ -60,7 +60,6 @@ export function ProviderDetailPage() {
     setProviderModelsEndpoint(provider.models_endpoint || "/v1/models")
     setProviderPreset(provider.preset || "custom")
     setProviderEnabled(Boolean(provider.enabled))
-    setProviderDefaultModel(provider.default_model_id || "")
   }, [provider])
 
   const addKey = (e: FormEvent) => {
@@ -69,10 +68,10 @@ export function ProviderDetailPage() {
   }
   const saveProvider = (e: FormEvent) => {
     e.preventDefault(); setProviderError(null)
-    updateProvider.mutate({ name: providerName, base_url: providerBaseUrl || null, models_endpoint: providerModelsEndpoint, preset: providerPreset, enabled: providerEnabled, default_model_id: providerDefaultModel || null }, { onSuccess: () => setShowSettings(false), onError: (err) => setProviderError(String(err)) })
+    updateProvider.mutate({ name: providerName, base_url: providerBaseUrl || null, models_endpoint: providerModelsEndpoint, preset: providerPreset, enabled: providerEnabled }, { onSuccess: () => setShowSettings(false), onError: (err) => setProviderError(String(err)) })
   }
-  const startEditKey = (k: NonNullable<typeof provider>["keys"][number]) => { setEditingKeyId(k.id); setKeyLabel(k.label); setKeyGroupName(k.group_name || ""); setKeyFamily(k.family); setKeyApiFormat(k.api_format || ""); setKeyApiKey("") }
-  const saveKey = (keyId: string) => { updateKey.mutate({ keyId, input: { label: keyLabel, group_name: keyGroupName || null, family: keyFamily, api_format: keyApiFormat || null, api_key: keyApiKey || undefined } }, { onSuccess: () => setEditingKeyId(null) }) }
+  const startEditKey = (k: NonNullable<typeof provider>["keys"][number]) => { setEditingKeyId(k.id); setKeyLabel(k.label); setKeyGroupName(k.group_name || ""); setKeyFamily(k.family); setKeyApiFormat(k.api_format || ""); setKeyApiKey(""); setKeyDefaultModel(k.default_model_id || "") }
+  const saveKey = (keyId: string) => { updateKey.mutate({ keyId, input: { label: keyLabel, group_name: keyGroupName || null, family: keyFamily, api_format: keyApiFormat || null, api_key: keyApiKey || undefined, default_model_id: keyDefaultModel || null } }, { onSuccess: () => setEditingKeyId(null) }) }
   const modelsForKey = (keyId: string) => provider?.models.filter((m) => !m.key_id || m.key_id === keyId) || []
 
   if (isLoading) return <p className="text-muted-foreground">加载中…</p>
@@ -94,10 +93,6 @@ export function ProviderDetailPage() {
               <Input className="h-9 w-32 text-xs" value={providerModelsEndpoint} onChange={(e) => setProviderModelsEndpoint(e.target.value)} />
               <Input className="h-9 w-24 text-xs" value={providerPreset} onChange={(e) => setProviderPreset(e.target.value)} />
               <label className="flex h-9 cursor-pointer items-center gap-1 text-xs text-muted-foreground"><input type="checkbox" checked={providerEnabled} onChange={(e) => setProviderEnabled(e.target.checked)} /> 启用</label>
-              <select value={providerDefaultModel} onChange={(e) => setProviderDefaultModel(e.target.value)} className="h-9 w-48 rounded-md border border-input bg-background px-2 text-xs">
-                <option value="">默认模型（可选）</option>
-                {provider.models.map((m) => (<option key={m.model_id} value={m.model_id}>{m.model_id}</option>))}
-              </select>
               <Button className="h-9 text-xs" type="submit" disabled={updateProvider.isPending}>{updateProvider.isPending ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-1 h-3.5 w-3.5" />}保存</Button>
             </form>
             {providerError && <p className="mt-2 text-xs text-destructive">{providerError}</p>}
@@ -131,14 +126,15 @@ export function ProviderDetailPage() {
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
                       {editingKeyId === k.id ? (
-                        <div className="grid flex-1 gap-2 md:grid-cols-[1fr_1.5fr_1fr_100px_120px]">
+                        <div className="grid flex-1 gap-2 md:grid-cols-[1fr_1.5fr_1fr_100px_120px_140px]">
                           <Input className="h-8 text-xs" value={keyLabel} onChange={(e) => setKeyLabel(e.target.value)} placeholder="别名" />
                           <Input className="h-8 text-xs" value={keyApiKey} onChange={(e) => setKeyApiKey(e.target.value)} placeholder="•••••••• (留空不修改)" autoComplete="off" />
                           <Input className="h-8 text-xs" value={keyGroupName} onChange={(e) => setKeyGroupName(e.target.value)} placeholder="分组名" />
                           <select value={keyFamily} onChange={(e) => setKeyFamily(e.target.value)} className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"><option value="mixed">mixed</option><option value="claude">claude</option><option value="codex">codex</option><option value="gemini">gemini</option><option value="other">other</option></select>
                           <select value={keyApiFormat} onChange={(e) => setKeyApiFormat(e.target.value)} className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"><option value="">默认</option><option value="openai_responses">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option></select>
+                          <select value={keyDefaultModel} onChange={(e) => setKeyDefaultModel(e.target.value)} className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"><option value="">默认模型</option>{modelsForKey(k.id).map((m) => (<option key={m.id} value={m.model_id}>{m.model_id}</option>))}</select>
                         </div>
-                      ) : (<><span className="font-medium text-sm">{k.label}</span>{k.group_name && <span className="text-[11px] text-muted-foreground">({k.group_name})</span>}<Badge variant="secondary" className="text-[10px] capitalize">{k.family}</Badge>{k.api_format && <Badge variant="outline" className="text-[10px]">{k.api_format}</Badge>}{k.auth_type === "oauth" && <Badge variant="outline" className="text-[10px]">OAuth</Badge>}</>)}
+                      ) : (<><span className="font-medium text-sm">{k.label}</span>{k.group_name && <span className="text-[11px] text-muted-foreground">({k.group_name})</span>}<Badge variant="secondary" className="text-[10px] capitalize">{k.family}</Badge>{k.api_format && <Badge variant="outline" className="text-[10px]">{k.api_format}</Badge>}{k.auth_type === "oauth" && <Badge variant="outline" className="text-[10px]">OAuth</Badge>}{k.default_model_id && <Badge variant="outline" className="text-[10px] bg-amber-900/20 text-amber-400 border-amber-700/30">默认 {k.default_model_id}</Badge>}</>)}
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-2">

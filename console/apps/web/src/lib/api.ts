@@ -47,7 +47,6 @@ export interface ProviderListItem {
   key_count: number
   model_count: number
   families: string[]
-  default_model_id: string | null
 }
 
 export interface ProviderKey {
@@ -58,6 +57,7 @@ export interface ProviderKey {
   api_format: string | null
   auth_type: string
   enabled: number
+  default_model_id: string | null
 }
 
 export interface ProviderModel {
@@ -77,7 +77,6 @@ export interface ProviderDetail {
   models_endpoint: string | null
   preset: string | null
   enabled: number
-  default_model_id: string | null
   keys: ProviderKey[]
   models: ProviderModel[]
   endpoints: { id: number; url: string }[]
@@ -166,7 +165,6 @@ export interface CreateProviderInput {
   models_endpoint?: string | null
   preset?: string | null
   enabled?: boolean
-  default_model_id?: string | null
 }
 
 export interface ImportProvidersResult {
@@ -210,12 +208,14 @@ export interface UpdateProviderKeyInput {
   api_format?: string | null
   enabled?: boolean
   api_key?: string
+  default_model_id?: string | null
 }
 
 export interface KeyModelEntry {
   provider_id: string
   key_id: string
   model_id: string
+  primary?: boolean
 }
 
 export interface ConfigPreview {
