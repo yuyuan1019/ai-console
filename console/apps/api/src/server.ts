@@ -63,6 +63,15 @@ registerImportJobsRoutes(app)
 
 app.get("/api/health", () => ({ ok: true, ts: Date.now() }))
 
+// ponytail: sweep zombie agents. An agent that crashes or loses network
+// without a clean WS close never fires the close handler, so the DB would
+// keep reporting it "online" forever. last_seen is updated by every
+// heartbeat, so stale == dead. 120s tolerance > 25s agent heartbeat interval.
+setInterval(() => {
+  const cutoff = Date.now() - 120_000
+  db.prepare("UPDATE servers SET status='offline' WHERE status='online' AND last_seen < ?").run(cutoff)
+}, 30_000)
+
 // SPA fallback
 app.get("/*", async (req, reply) => {
   if (req.url.startsWith("/api/")) return reply.code(404).send({ error: "not found" })

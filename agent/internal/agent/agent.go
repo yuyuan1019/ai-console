@@ -216,7 +216,17 @@ func (a *Agent) connectWS(ctx context.Context) error {
 
 	log.Printf("ws connected")
 
-	heartbeat := time.NewTicker(60 * time.Second)
+	// ponytail: ping/pong detects half-open connections. A reverse proxy idle
+	// timeout (nginx default 60s) closes the link silently; without read
+	// deadlines the agent never notices and tasks never arrive. Pong resets
+	// the read deadline; 25s ping stays under the 60s proxy_read_timeout.
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		return nil
+	})
+	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+
+	heartbeat := time.NewTicker(25 * time.Second)
 	defer heartbeat.Stop()
 
 	done := make(chan error, 1)
@@ -227,6 +237,7 @@ func (a *Agent) connectWS(ctx context.Context) error {
 				done <- err
 				return
 			}
+			conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 			var cmd wsCmd
 			if err := json.Unmarshal(msg, &cmd); err != nil {
 				continue
@@ -249,76 +260,77 @@ func (a *Agent) connectWS(ctx context.Context) error {
 		case err := <-done:
 			return err
 		case <-heartbeat.C:
+			if err := a.wsWritePing(conn); err != nil {
+				return err
+			}
 			a.sendHeartbeat(conn)
 		}
 	}
 }
 
 func (a *Agent) pollRest(ctx context.Context) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-
-		req, _ := http.NewRequestWithContext(ctx, "GET", a.cfg.Server+"/agent/tasks", nil)
-		req.Header.Set("Authorization", "Bearer "+a.agentTok)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			log.Printf("rest poll error: %v", err)
-			continue
-		}
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
-		resp.Body.Close()
-		if resp.StatusCode != 200 {
-			log.Printf("rest poll: %d", resp.StatusCode)
-			continue
-		}
-
-		var tr restTaskResponse
-		if err := json.Unmarshal(body, &tr); err != nil || tr.Task == nil {
-			continue
-		}
-
-		task := tr.Task
-		log.Printf("rest task: %s %s", task.ID, task.Action)
-		result, errStr := a.handleCmd(task.Action, task.Payload)
-		ok := errStr == ""
-
-		var resultJSON json.RawMessage
-		if result != nil {
-			resultJSON, _ = json.Marshal(result)
-		}
-		report := map[string]interface{}{
-			"ok":     ok,
-			"result": json.RawMessage{},
-			"error":  errStr,
-		}
-		if resultJSON != nil {
-			report["result"] = resultJSON
-		}
-		reportData, _ := json.Marshal(report)
-
-		req2, _ := http.NewRequestWithContext(ctx, "POST",
-			fmt.Sprintf("%s/agent/tasks/%s/result", a.cfg.Server, task.ID),
-			bytes.NewReader(reportData))
-		req2.Header.Set("Content-Type", "application/json")
-		req2.Header.Set("Authorization", "Bearer "+a.agentTok)
-		r, err := http.DefaultClient.Do(req2)
-		if err != nil {
-			log.Printf("rest report error: %v", err)
-			continue
-		}
-		io.Copy(io.Discard, r.Body)
-		r.Body.Close()
-
-		// after processing a task, send heartbeat to update status
-		a.restHeartbeat()
+	// ponytail: single round then return, so Run retries WS. Previously this
+	// looped forever, trapping the agent in REST mode and never reconnecting
+	// WS. Heartbeat every round keeps console status honest even with no tasks
+	// (previously only sent after a task).
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(30 * time.Second):
 	}
+
+	a.restHeartbeat()
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", a.cfg.Server+"/agent/tasks", nil)
+	req.Header.Set("Authorization", "Bearer "+a.agentTok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		log.Printf("rest poll error: %v", err)
+		return
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Printf("rest poll: %d", resp.StatusCode)
+		return
+	}
+
+	var tr restTaskResponse
+	if err := json.Unmarshal(body, &tr); err != nil || tr.Task == nil {
+		return
+	}
+
+	task := tr.Task
+	log.Printf("rest task: %s %s", task.ID, task.Action)
+	result, errStr := a.handleCmd(task.Action, task.Payload)
+	ok := errStr == ""
+
+	var resultJSON json.RawMessage
+	if result != nil {
+		resultJSON, _ = json.Marshal(result)
+	}
+	report := map[string]interface{}{
+		"ok":     ok,
+		"result": json.RawMessage{},
+		"error":  errStr,
+	}
+	if resultJSON != nil {
+		report["result"] = resultJSON
+	}
+	reportData, _ := json.Marshal(report)
+
+	req2, _ := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("%s/agent/tasks/%s/result", a.cfg.Server, task.ID),
+		bytes.NewReader(reportData))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("Authorization", "Bearer "+a.agentTok)
+	r, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		log.Printf("rest report error: %v", err)
+		return
+	}
+	io.Copy(io.Discard, r.Body)
+	r.Body.Close()
 }
 
 func (a *Agent) restHeartbeat() {
@@ -354,7 +366,7 @@ func (a *Agent) sendHeartbeat(conn *websocket.Conn) {
 		},
 	}
 	b, _ := json.Marshal(msg)
-	conn.WriteMessage(websocket.TextMessage, b)
+	a.wsWriteText(conn, b)
 }
 
 func (a *Agent) handleCmdWS(conn *websocket.Conn, cmd *wsCmd) {
@@ -378,7 +390,23 @@ func (a *Agent) sendResult(conn *websocket.Conn, cmd *wsCmd, ok bool, result map
 		},
 	}
 	b, _ := json.Marshal(msg)
-	conn.WriteMessage(websocket.TextMessage, b)
+	a.wsWriteText(conn, b)
+}
+
+// wsWriteText serializes WS writes; gorilla/websocket allows only one
+// concurrent writer. ponytail: handleCmdWS runs per-command goroutines that
+// race with sendHeartbeat — unsynchronized writes corrupt frames and can
+// drop the connection (one more cause of "quickly offline").
+func (a *Agent) wsWriteText(conn *websocket.Conn, b []byte) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return conn.WriteMessage(websocket.TextMessage, b)
+}
+
+func (a *Agent) wsWritePing(conn *websocket.Conn) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
 }
 
 func (a *Agent) handleCmd(action string, payload []byte) (map[string]interface{}, string) {

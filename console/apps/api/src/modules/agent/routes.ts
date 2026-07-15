@@ -560,12 +560,20 @@ echo "Your CLI tools (codex/claude/gemini/opencode) and their configs are NOT to
     })
 
     socket.on("close", () => {
-      onlineAgents.delete(serverId)
-      db.prepare("UPDATE servers SET status='offline' WHERE id=?").run(serverId)
+      // ponytail: only tear down if this socket is still the current one.
+      // A reconnect may have already replaced the map entry; an old socket's
+      // close firing would otherwise delete the fresh entry and mark online
+      // server offline (reconnect race -> "quickly offline").
+      const cur = onlineAgents.get(serverId)
+      if (cur?.ws === socket) {
+        onlineAgents.delete(serverId)
+        db.prepare("UPDATE servers SET status='offline' WHERE id=?").run(serverId)
+      }
     })
 
     socket.on("error", () => {
-      onlineAgents.delete(serverId)
+      const cur = onlineAgents.get(serverId)
+      if (cur?.ws === socket) onlineAgents.delete(serverId)
     })
   })
 
