@@ -97,6 +97,7 @@ export function ServerDetailPage() {
   const [nameDraft, setNameDraft] = useState("")
   const [nameError, setNameError] = useState<string | null>(null)
   const [loadedTool, setLoadedTool] = useState(tool)
+  const [activeTab, setActiveTab] = useState("overview")
 
   const latestReadContent = useMemo(() =>
     tasks
@@ -280,7 +281,7 @@ export function ServerDetailPage() {
           <Trash2 className="mr-1 h-4 w-4" /> 删除
         </Button>
       </div>
-      <Tabs defaultValue="overview">
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="w-full justify-start overflow-x-auto">
           <TabsTrigger value="overview">概览</TabsTrigger>
           <TabsTrigger value="configs">配置</TabsTrigger>
@@ -311,7 +312,7 @@ export function ServerDetailPage() {
                   disabled={upgradeAgent.isPending}
                   onClick={() => {
                     if (confirm(`升级 ${server.name} 上的 agent？会从本控制台下载最新二进制并自动重启服务。`)) {
-                      upgradeAgent.mutate()
+                      upgradeAgent.mutate(undefined, { onSuccess: () => setActiveTab("configs") })
                     }
                   }}
                 >

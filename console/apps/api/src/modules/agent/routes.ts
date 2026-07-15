@@ -113,10 +113,11 @@ export function handleTaskResult(serverId: string, taskId: string, body: { ok?: 
       )
     }
   }
-  if (ok && task.action === "upgrade_agent" && result?.new_version) {
-    db.prepare("UPDATE servers SET agent_version=?, last_seen=? WHERE id=?").run(
-      String(result.new_version).slice(0, 120), now, serverId
-    )
+  if (ok && task.action === "upgrade_agent") {
+    const v = result?.new_version ? String(result.new_version).slice(0, 120) : null
+    if (v) {
+      db.prepare("UPDATE servers SET agent_version=?, last_seen=? WHERE id=?").run(v, now, serverId)
+    }
   }
   broadcastEvent(`server:${serverId}:tasks`, { task_id: taskId, status: ok ? "done" : "failed" })
   broadcastBatchProgressForTask(taskId)

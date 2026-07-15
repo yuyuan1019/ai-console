@@ -497,29 +497,51 @@ func (a *Agent) handleUpgradeAgent(cmd *wsCmd) (map[string]interface{}, string) 
 	}
 
 	tmpPath := exe + ".new"
-	f, err := os.Create(tmpPath)
+	f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0700)
 	if err != nil {
 		return nil, fmt.Sprintf("create tmp: %v", err)
 	}
-	io.Copy(f, resp.Body)
+	n, err := io.Copy(f, resp.Body)
 	f.Close()
-	os.Chmod(tmpPath, 0755)
+	if err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Sprintf("write tmp: %v", err)
+	}
+	if n < 1024 {
+		os.Remove(tmpPath)
+		return nil, fmt.Sprintf("downloaded binary too small (%d bytes)", n)
+	}
 
-	// backup current
+	// validate new binary is executable
+	test := exec.Command(tmpPath, "--help")
+	test.Stdout = io.Discard
+	test.Stderr = io.Discard
+	if err := test.Run(); err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Sprintf("new binary is not executable: %v", err)
+	}
+
 	backupPath := exe + ".bak"
-	os.Rename(exe, backupPath)
-
+	os.Remove(backupPath)
+	if err := os.Rename(exe, backupPath); err != nil {
+		os.Remove(tmpPath)
+		return nil, fmt.Sprintf("backup current: %v", err)
+	}
 	if err := os.Rename(tmpPath, exe); err != nil {
 		os.Rename(backupPath, exe)
-		return nil, fmt.Sprintf("rename: %v", err)
+		os.Remove(tmpPath)
+		return nil, fmt.Sprintf("install new: %v", err)
 	}
+
+	// exit so service manager restarts with new binary
+	go func() { time.Sleep(100 * time.Millisecond); os.Exit(0) }()
 
 	return map[string]interface{}{
 		"old_version": oldVersion,
-		"new_version": "latest",
+		"new_version": a.cfg.Version,
 		"path":        exe,
 		"backup":      backupPath,
-		"restart":     "agent has self-upgraded, restart required",
+		"restart":     "agent will restart with new binary",
 	}, ""
 }
 
