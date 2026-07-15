@@ -38,10 +38,10 @@ export function BatchPage() {
 
   function generatePreview() {
     setPreview(null)
-    if (tool === "opencode" && selectedKeys.length > 1) {
-      previewMut.mutate({ tool, keys: selectedKeys }, { onSuccess: setPreview })
+    if (tool === "opencode" && selectedKeys.length > 0) {
+      previewMut.mutate({ tool, keys: selectedKeys }, { onSuccess: setPreview, onError: (e) => alert(String(e)) })
     } else if (providerId && keyId && modelId) {
-      previewMut.mutate({ tool, provider_id: providerId, key_id: keyId, model_id: modelId }, { onSuccess: setPreview })
+      previewMut.mutate({ tool, provider_id: providerId, key_id: keyId, model_id: modelId }, { onSuccess: setPreview, onError: (e) => alert(String(e)) })
     }
   }
 
@@ -56,15 +56,17 @@ export function BatchPage() {
 
   function doExecute() {
     if (!confirm(`确认下发 ${tool} 配置到 ${selectedServers.size} 台机器？每台机器会先备份当前配置。`)) return
-    if (tool === "opencode" && selectedKeys.length > 1) {
+    const onSuccess = (r: { id: string }) => { setBatchId(r.id); setStep(4) }
+    const onError = (e: Error) => alert(String(e))
+    if (tool === "opencode" && selectedKeys.length > 0) {
       executeMut.mutate(
         { tool, server_ids: [...selectedServers], keys: selectedKeys },
-        { onSuccess: (r) => { setBatchId(r.id); setStep(4) } }
+        { onSuccess, onError }
       )
     } else {
       executeMut.mutate(
         { tool, server_ids: [...selectedServers], provider_id: providerId, key_id: keyId, model_id: modelId },
-        { onSuccess: (r) => { setBatchId(r.id); setStep(4) } }
+        { onSuccess, onError }
       )
     }
   }
