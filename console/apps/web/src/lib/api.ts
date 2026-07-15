@@ -156,6 +156,7 @@ export interface RefreshModelsResult {
   ok: boolean
   created: number
   updated: number
+  removed?: number
   total: number
 }
 

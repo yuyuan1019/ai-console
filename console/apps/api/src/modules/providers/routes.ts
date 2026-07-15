@@ -457,6 +457,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
       const now = Date.now()
       let created = 0
       let updated = 0
+      let removed = 0
       db.exec("BEGIN")
       try {
         for (const item of items) {
@@ -481,18 +482,22 @@ export function registerProvidersRoutes(app: FastifyInstance) {
             created++
           }
         }
+        removed = (db.prepare(
+          "UPDATE models SET enabled=0 WHERE provider_id=? AND key_id=? AND enabled=1 AND fetched_at != ?"
+        ).run(req.params.id, req.params.keyId, now) as any).changes
         db.prepare("UPDATE provider_keys SET last_models_refresh=? WHERE id=?").run(now, req.params.keyId)
         audit(user.id, "provider_key.refresh_models", `provider_key:${req.params.keyId}`, null, {
           provider_id: req.params.id,
           created,
           updated,
+          removed,
         })
         db.exec("COMMIT")
       } catch (e) {
         db.exec("ROLLBACK")
         throw e
       }
-      return { ok: true, created, updated, total: created + updated }
+      return { ok: true, created, updated, removed: removed || 0, total: created + updated }
     }
   )
 
