@@ -154,7 +154,7 @@ export function ServerDetailPage() {
     if (tool === "claude") {
       return { ANTHROPIC_AUTH_TOKEN: "sk-***", ANTHROPIC_BASE_URL: baseUrl }
     }
-    if (tool === "codex") return { OPENAI_API_KEY: "sk-***", OPENAI_BASE_URL: withOpenAiV1(baseUrl) }
+    if (tool === "codex") return {}
     if (tool === "gemini") return { GEMINI_API_KEY: "sk-***", GOOGLE_GEMINI_BASE_URL: baseUrl }
     if (tool === "opencode") return { apiKey: "sk-***", baseURL: withOpenAiV1(baseUrl) }
     return {}
@@ -347,6 +347,7 @@ export function ServerDetailPage() {
                 <div className="flex items-center justify-between">
                   <div className="font-medium">凭据下发</div>
                 <div className="flex items-center gap-2">
+                  {tool !== "codex" && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -356,6 +357,7 @@ export function ServerDetailPage() {
                     {setCredential.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Key className="mr-1 h-3 w-3" />}
                     下发凭据
                   </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="ghost"

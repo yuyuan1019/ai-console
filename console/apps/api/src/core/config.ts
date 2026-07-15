@@ -220,12 +220,28 @@ export function generateConfig(tool: string, opts: {
   }
 
   if (tool === "codex") {
+    // ponytail: codex config.toml has no api_key field. Embed the key as
+    // experimental_bearer_token so codex is self-contained WITHOUT writing
+    // OPENAI_API_KEY/OPENAI_BASE_URL env vars (which leak into opencode).
+    const bearer = apiKey.replace(/\\/g, "\\\\").replace(/"/g, '\\"')
     if (raw?.config && typeof raw.config === "string") {
       let toml = raw.config
       toml = toml.replace(/model\s*=\s*["'][^"']*["']/i, `model = "${model}"`)
       const baseUrlMatch = toml.match(/base_url\s*=\s*["']([^"']+)["']/i)
       if (baseUrlMatch) {
         toml = toml.replace(/base_url\s*=\s*["'][^"']*["']/i, `base_url = "${openAiBaseUrl}"`)
+      }
+      if (/experimental_bearer_token\s*=/i.test(toml)) {
+        toml = toml.replace(/experimental_bearer_token\s*=\s*["'][^"']*["']/i, `experimental_bearer_token = "${bearer}"`)
+      } else {
+        const mpIdMatch = toml.match(/model_provider\s*=\s*["']([^"']+)["']/i)
+        const mpId = mpIdMatch ? mpIdMatch[1] : null
+        const headerRe = mpId ? new RegExp(`(\\[model_providers\\.${mpId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\][^\\n]*)`, "i") : null
+        if (headerRe && headerRe.test(toml)) {
+          toml = toml.replace(headerRe, `$1\nexperimental_bearer_token = "${bearer}"`)
+        } else {
+          toml += `\n\n[model_providers.${providerId}]\nname = "${providerLabel}"\nbase_url = "${openAiBaseUrl}"\nexperimental_bearer_token = "${bearer}"`
+        }
       }
       return { content: toml, format: "toml" }
     }
@@ -236,6 +252,7 @@ export function generateConfig(tool: string, opts: {
       `[model_providers.${providerId}]`,
       `name = "${providerLabel}"`,
       `base_url = "${openAiBaseUrl}"`,
+      `experimental_bearer_token = "${bearer}"`,
     ].join("\n")
     return { content: toml, format: "toml" }
   }

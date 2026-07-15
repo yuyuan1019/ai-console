@@ -189,8 +189,9 @@ function materializeTaskPayload(action: string, payloadJson: string) {
     credentials["ANTHROPIC_AUTH_TOKEN"] = secret
     credentials["ANTHROPIC_BASE_URL"] = baseUrl
   } else if (tool === "codex") {
-    credentials["OPENAI_API_KEY"] = secret
-    credentials["OPENAI_BASE_URL"] = withOpenAiV1(baseUrl)
+    // ponytail: codex key now lives in config.toml (experimental_bearer_token,
+    // set via write_config). No env vars - OPENAI_API_KEY/OPENAI_BASE_URL would
+    // leak into opencode. set_credential is a no-op for codex (UI button removed).
   } else if (tool === "gemini") {
     credentials["GEMINI_API_KEY"] = secret
     credentials["GOOGLE_GEMINI_BASE_URL"] = baseUrl
