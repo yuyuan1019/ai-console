@@ -196,19 +196,9 @@ function materializeTaskPayload(action: string, payloadJson: string) {
     credentials["GEMINI_API_KEY"] = secret
     credentials["GOOGLE_GEMINI_BASE_URL"] = baseUrl
   } else if (tool === "opencode") {
-    const apiFormat = key.api_format === "anthropic" ? "anthropic" : "openai"
-    const models = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND key_id=?").all(providerId, keyId) as any[])
-      .map((m) => String(m.model_id))
-    const providerLabel = String(key.provider_name || "").trim()
-    const groupLabel = key.group_name ? `_${String(key.group_name).trim()}` : ""
-    const providerSid = `${providerLabel}${groupLabel}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
-    credentials["apiKey"] = secret
-    credentials["baseURL"] = withOpenAiV1(baseUrl)
-    credentials["api_format"] = apiFormat
-    credentials["provider_name"] = providerLabel
-    credentials["group_name"] = String(key.group_name || "").trim()
-    credentials["provider_id"] = providerSid
-    credentials["models"] = JSON.stringify(models)
+    // ponytail: opencode reads ~/.config/opencode/opencode.json, NOT env vars.
+    // Credentials travel via write_config (opencode.json has apiKey in
+    // provider.options). set_credential env exports were useless. No-op here.
   }
   return { tool, credentials }
 }

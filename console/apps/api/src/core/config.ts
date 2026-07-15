@@ -252,6 +252,7 @@ export function generateConfig(tool: string, opts: {
       `[model_providers.${providerId}]`,
       `name = "${providerLabel}"`,
       `base_url = "${openAiBaseUrl}"`,
+      `wire_api = "responses"`,
       `experimental_bearer_token = "${bearer}"`,
     ].join("\n")
     return { content: toml, format: "toml" }
@@ -292,6 +293,8 @@ export function buildOpenCodeConfig(entry: {
     models: { [entry.model]: {} },
   }
   config.model = `${entry.providerId}/${entry.model}`
+  if (!config.$schema) config.$schema = "https://opencode.ai/config.json"
+  if (!config.agent) config.agent = { build: { options: { store: false } }, plan: { options: { store: false } } }
   return config
 }
 
@@ -310,5 +313,7 @@ export function mergeOpenCodeConfig(entries: {
   }
   const first = entries[0]
   config.model = first ? `${first.providerId}/${first.model}` : ""
+  if (!config.$schema) config.$schema = "https://opencode.ai/config.json"
+  if (!config.agent) config.agent = { build: { options: { store: false } }, plan: { options: { store: false } } }
   return config
 }

@@ -13,12 +13,6 @@ function formatTs(value: number | null) {
   return value ? new Date(value).toLocaleString() : "从未"
 }
 
-function withOpenAiV1(value?: string | null) {
-  const base = String(value || "").trim().replace(/\/+$/, "")
-  if (!base) return ""
-  return /\/v1$/i.test(base) ? base : `${base}/v1`
-}
-
 type DiffLine = { type: "same" | "added" | "removed"; line: string }
 
 function diffLines(oldText: string, newText: string): DiffLine[] {
@@ -156,7 +150,7 @@ export function ServerDetailPage() {
     }
     if (tool === "codex") return {}
     if (tool === "gemini") return { GEMINI_API_KEY: "sk-***", GOOGLE_GEMINI_BASE_URL: baseUrl }
-    if (tool === "opencode") return { apiKey: "sk-***", baseURL: withOpenAiV1(baseUrl) }
+    if (tool === "opencode") return {}
     return {}
   }, [tool, credKeyId, credKeys, credProviderDetail])
 
@@ -347,7 +341,7 @@ export function ServerDetailPage() {
                 <div className="flex items-center justify-between">
                   <div className="font-medium">凭据下发</div>
                 <div className="flex items-center gap-2">
-                  {tool !== "codex" && (
+                  {tool !== "codex" && tool !== "opencode" && (
                   <Button
                     size="sm"
                     variant="outline"
