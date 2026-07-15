@@ -268,7 +268,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
       .all(req.params.id)
     const models = db
       .prepare(
-        "SELECT id,key_id,model_id,family,display_name,context_window,enabled FROM models WHERE provider_id=? ORDER BY model_id"
+        "SELECT id,key_id,model_id,family,display_name,context_window,enabled FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id"
       )
       .all(req.params.id)
     const endpoints = db
