@@ -28,6 +28,12 @@ type Config struct {
 	Version string
 }
 
+type stateData struct {
+	Server     string `json:"server"`
+	ServerID   string `json:"server_id"`
+	AgentToken string `json:"agent_token"`
+}
+
 type Agent struct {
 	cfg      *Config
 	serverID string
@@ -67,9 +73,20 @@ type writeConfigPayload struct {
 	Content string `json:"content"`
 }
 
-type upgradeAgentPayload struct {
-	URL     string `json:"url"`
-	Version string `json:"version"`
+type restTaskResponse struct {
+	Task *restTask `json:"task"`
+}
+
+type restTask struct {
+	ID      string          `json:"id"`
+	Action  string          `json:"action"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type restResultBody struct {
+	Ok     bool            `json:"ok"`
+	Result json.RawMessage `json:"result"`
+	Error  string          `json:"error"`
 }
 
 func New(cfg *Config) (*Agent, error) {
@@ -82,7 +99,45 @@ func New(cfg *Config) (*Agent, error) {
 
 func (a *Agent) ServerID() string { return a.serverID }
 
+func (a *Agent) loadState() bool {
+	data, err := os.ReadFile(filepath.Join(a.dir, "state.json"))
+	if err != nil {
+		return false
+	}
+	var s stateData
+	if err := json.Unmarshal(data, &s); err != nil {
+		return false
+	}
+	if s.ServerID == "" || s.AgentToken == "" {
+		return false
+	}
+	a.serverID = s.ServerID
+	a.agentTok = s.AgentToken
+	if s.Server != "" && a.cfg.Server == "" {
+		a.cfg.Server = s.Server
+	}
+	log.Printf("loaded saved state: server_id=%s", a.serverID)
+	return true
+}
+
+func (a *Agent) saveState() {
+	state := stateData{
+		Server:     a.cfg.Server,
+		ServerID:   a.serverID,
+		AgentToken: a.agentTok,
+	}
+	data, _ := json.Marshal(state)
+	os.WriteFile(filepath.Join(a.dir, "state.json"), data, 0600)
+}
+
 func (a *Agent) Enroll(ctx context.Context) error {
+	if a.loadState() && a.cfg.Token == "" {
+		return nil
+	}
+	if a.cfg.Token == "" {
+		return fmt.Errorf("no enroll token and no saved state")
+	}
+
 	host, _ := os.Hostname()
 	body := map[string]interface{}{
 		"token":    a.cfg.Token,
@@ -112,12 +167,13 @@ func (a *Agent) Enroll(ctx context.Context) error {
 	a.serverID = r.ServerID
 	a.agentTok = r.AgentToken
 	a.saveState()
+	log.Printf("enrolled: server_id=%s", a.serverID)
 	return nil
 }
 
 func (a *Agent) Run(ctx context.Context) error {
-	if a.serverID == "" {
-		return fmt.Errorf("must enroll first")
+	if err := a.Enroll(ctx); err != nil {
+		return err
 	}
 
 	for {
@@ -126,18 +182,22 @@ func (a *Agent) Run(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
-		if err := a.connect(ctx); err != nil {
-			log.Printf("ws: %v, retrying in 10s", err)
+
+		if err := a.connectWS(ctx); err != nil {
+			log.Printf("ws error: %v, falling back to REST polling", err)
+			a.pollRest(ctx)
+
 		}
+
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(10 * time.Second):
+		case <-time.After(5 * time.Second):
 		}
 	}
 }
 
-func (a *Agent) connect(ctx context.Context) error {
+func (a *Agent) connectWS(ctx context.Context) error {
 	u, err := url.Parse(a.cfg.Server)
 	if err != nil {
 		return err
@@ -154,7 +214,7 @@ func (a *Agent) connect(ctx context.Context) error {
 	}
 	defer conn.Close()
 
-	log.Printf("connected to %s", wsURL)
+	log.Printf("ws connected")
 
 	heartbeat := time.NewTicker(60 * time.Second)
 	defer heartbeat.Stop()
@@ -169,14 +229,15 @@ func (a *Agent) connect(ctx context.Context) error {
 			}
 			var cmd wsCmd
 			if err := json.Unmarshal(msg, &cmd); err != nil {
-				log.Printf("bad message: %v", err)
 				continue
 			}
 			if cmd.Type == "ack" {
 				continue
 			}
 			if cmd.Type == "cmd" {
-				go a.handleCmd(conn, &cmd)
+				go func(cmd wsCmd) {
+					a.handleCmdWS(conn, &cmd)
+				}(cmd)
 			}
 		}
 	}()
@@ -191,6 +252,93 @@ func (a *Agent) connect(ctx context.Context) error {
 			a.sendHeartbeat(conn)
 		}
 	}
+}
+
+func (a *Agent) pollRest(ctx context.Context) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+
+		req, _ := http.NewRequestWithContext(ctx, "GET", a.cfg.Server+"/agent/tasks", nil)
+		req.Header.Set("Authorization", "Bearer "+a.agentTok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			log.Printf("rest poll error: %v", err)
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			log.Printf("rest poll: %d", resp.StatusCode)
+			continue
+		}
+
+		var tr restTaskResponse
+		if err := json.Unmarshal(body, &tr); err != nil || tr.Task == nil {
+			continue
+		}
+
+		task := tr.Task
+		log.Printf("rest task: %s %s", task.ID, task.Action)
+		result, errStr := a.handleCmd(task.Action, task.Payload)
+		ok := errStr == ""
+
+		var resultJSON json.RawMessage
+		if result != nil {
+			resultJSON, _ = json.Marshal(result)
+		}
+		report := map[string]interface{}{
+			"ok":     ok,
+			"result": json.RawMessage{},
+			"error":  errStr,
+		}
+		if resultJSON != nil {
+			report["result"] = resultJSON
+		}
+		reportData, _ := json.Marshal(report)
+
+		req2, _ := http.NewRequestWithContext(ctx, "POST",
+			fmt.Sprintf("%s/agent/tasks/%s/result", a.cfg.Server, task.ID),
+			bytes.NewReader(reportData))
+		req2.Header.Set("Content-Type", "application/json")
+		req2.Header.Set("Authorization", "Bearer "+a.agentTok)
+		r, err := http.DefaultClient.Do(req2)
+		if err != nil {
+			log.Printf("rest report error: %v", err)
+			continue
+		}
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+
+		// after processing a task, send heartbeat to update status
+		a.restHeartbeat()
+	}
+}
+
+func (a *Agent) restHeartbeat() {
+	host, _ := os.Hostname()
+	body := map[string]interface{}{
+		"status":  "online",
+		"host":    host,
+		"tools":   detectTools(),
+		"version": a.cfg.Version,
+	}
+	data, _ := json.Marshal(body)
+	req, _ := http.NewRequestWithContext(context.Background(), "POST", a.cfg.Server+"/agent/heartbeat", bytes.NewReader(data))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+a.agentTok)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }
 
 func (a *Agent) sendHeartbeat(conn *websocket.Conn) {
@@ -209,38 +357,9 @@ func (a *Agent) sendHeartbeat(conn *websocket.Conn) {
 	conn.WriteMessage(websocket.TextMessage, b)
 }
 
-func (a *Agent) handleCmd(conn *websocket.Conn, cmd *wsCmd) {
-	var result map[string]interface{}
-	var errStr string
-	ok := true
-
-	switch cmd.Action {
-	case "set_credential":
-		result, errStr = a.handleSetCred(cmd)
-	case "remove_credential":
-		result, errStr = a.handleRemoveCred(cmd)
-	case "read_config":
-		result, errStr = a.handleReadConfig(cmd)
-	case "write_config":
-		result, errStr = a.handleWriteConfig(cmd)
-	case "list_config_backups":
-		result, errStr = a.handleListBackups(cmd)
-	case "restore_config_backup":
-		result, errStr = a.handleRestoreBackup(cmd)
-	case "detect_tools":
-		result = map[string]interface{}{"tools": detectTools()}
-	case "upgrade_agent":
-		result, errStr = a.handleUpgradeAgent(cmd)
-	case "upgrade_tool":
-		result, errStr = a.handleUpgradeTool(cmd)
-	default:
-		errStr = fmt.Sprintf("unknown action: %s", cmd.Action)
-	}
-
-	if errStr != "" {
-		ok = false
-	}
-
+func (a *Agent) handleCmdWS(conn *websocket.Conn, cmd *wsCmd) {
+	result, errStr := a.handleCmd(cmd.Action, cmd.Payload)
+	ok := errStr == ""
 	a.sendResult(conn, cmd, ok, result, errStr)
 }
 
@@ -262,15 +381,39 @@ func (a *Agent) sendResult(conn *websocket.Conn, cmd *wsCmd, ok bool, result map
 	conn.WriteMessage(websocket.TextMessage, b)
 }
 
+func (a *Agent) handleCmd(action string, payload []byte) (map[string]interface{}, string) {
+	switch action {
+	case "set_credential":
+		return a.handleSetCred(payload)
+	case "remove_credential":
+		return a.handleRemoveCred(payload)
+	case "read_config":
+		return a.handleReadConfig(payload)
+	case "write_config":
+		return a.handleWriteConfig(payload)
+	case "list_config_backups":
+		return a.handleListBackups(payload)
+	case "restore_config_backup":
+		return a.handleRestoreBackup(payload)
+	case "detect_tools":
+		return map[string]interface{}{"tools": detectTools()}, ""
+	case "upgrade_agent":
+		return a.handleUpgradeAgent(payload)
+	case "upgrade_tool":
+		return a.handleUpgradeTool(payload)
+	}
+	return nil, fmt.Sprintf("unknown action: %s", action)
+}
+
 // --- credential handling ---
 
 func (a *Agent) credFile(tool string) string {
 	return filepath.Join(a.credsDir, tool+".sh")
 }
 
-func (a *Agent) handleSetCred(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 	var p setCredPayload
-	if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("bad payload: %v", err)
 	}
 
@@ -285,19 +428,13 @@ func (a *Agent) handleSetCred(cmd *wsCmd) (map[string]interface{}, string) {
 		return nil, fmt.Sprintf("write %s: %v", path, err)
 	}
 
-	// ensure shellrc sources creds dir
 	a.ensureCredSourcing()
-
-	return map[string]interface{}{
-		"path":   path,
-		"format": "shell",
-		"keys":   mapKeys(p.Credentials),
-	}, ""
+	return map[string]interface{}{"path": path, "format": "shell", "keys": mapKeys(p.Credentials)}, ""
 }
 
-func (a *Agent) handleRemoveCred(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleRemoveCred(payload []byte) (map[string]interface{}, string) {
 	var p removeCredPayload
-	if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("bad payload: %v", err)
 	}
 
@@ -312,7 +449,6 @@ func (a *Agent) handleRemoveCred(cmd *wsCmd) (map[string]interface{}, string) {
 		removed = append(removed, path)
 	}
 
-	// also clean the env vars in current process (won't persist, but best-effort)
 	for _, k := range p.EnvKeysToRemove {
 		os.Unsetenv(k)
 	}
@@ -335,14 +471,13 @@ func toolConfigPath(tool string) string {
 		return filepath.Join(home, ".gemini", "settings.json")
 	case "opencode":
 		return filepath.Join(home, ".config", "opencode", "opencode.json")
-	default:
-		return ""
 	}
+	return ""
 }
 
-func (a *Agent) handleReadConfig(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleReadConfig(payload []byte) (map[string]interface{}, string) {
 	var p writeConfigPayload
-	json.Unmarshal(cmd.Payload, &p)
+	json.Unmarshal(payload, &p)
 	path := toolConfigPath(p.Tool)
 	if path == "" {
 		return nil, "unsupported tool"
@@ -354,42 +489,28 @@ func (a *Agent) handleReadConfig(cmd *wsCmd) (map[string]interface{}, string) {
 		}
 		return nil, fmt.Sprintf("read %s: %v", path, err)
 	}
-	return map[string]interface{}{
-		"content": string(data),
-		"format":  formatForTool(p.Tool),
-		"path":    path,
-	}, ""
+	return map[string]interface{}{"content": string(data), "format": formatForTool(p.Tool), "path": path}, ""
 }
 
-func (a *Agent) handleWriteConfig(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleWriteConfig(payload []byte) (map[string]interface{}, string) {
 	var p writeConfigPayload
-	if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("bad payload: %v", err)
 	}
 	path := toolConfigPath(p.Tool)
 	if path == "" {
 		return nil, "unsupported tool"
 	}
-
 	os.MkdirAll(filepath.Dir(path), 0755)
 
-	// backup first
 	backupPath := backupFilePath(path)
 	if existing, err := os.ReadFile(path); err == nil {
 		os.WriteFile(backupPath, existing, 0644)
 	}
-
-	content := p.Content
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(p.Content), 0644); err != nil {
 		return nil, fmt.Sprintf("write %s: %v", path, err)
 	}
-
-	return map[string]interface{}{
-		"path":    path,
-		"format":  p.Format,
-		"content": content,
-		"backup":  filepath.Base(backupPath),
-	}, ""
+	return map[string]interface{}{"path": path, "format": p.Format, "content": p.Content, "backup": filepath.Base(backupPath)}, ""
 }
 
 // --- backups ---
@@ -401,9 +522,9 @@ func backupFilePath(path string) string {
 	return filepath.Join(dir, fmt.Sprintf(".%s.bak.%s", base, ts))
 }
 
-func (a *Agent) handleListBackups(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleListBackups(payload []byte) (map[string]interface{}, string) {
 	var p writeConfigPayload
-	json.Unmarshal(cmd.Payload, &p)
+	json.Unmarshal(payload, &p)
 	path := toolConfigPath(p.Tool)
 	if path == "" {
 		return nil, "unsupported tool"
@@ -423,12 +544,12 @@ func (a *Agent) handleListBackups(cmd *wsCmd) (map[string]interface{}, string) {
 	return map[string]interface{}{"backups": backups, "path": path}, ""
 }
 
-func (a *Agent) handleRestoreBackup(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleRestoreBackup(payload []byte) (map[string]interface{}, string) {
 	var p struct {
 		Tool   string `json:"tool"`
 		Backup string `json:"backup"`
 	}
-	if err := json.Unmarshal(cmd.Payload, &p); err != nil {
+	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("bad payload: %v", err)
 	}
 	path := toolConfigPath(p.Tool)
@@ -438,7 +559,6 @@ func (a *Agent) handleRestoreBackup(cmd *wsCmd) (map[string]interface{}, string)
 	dir := filepath.Dir(path)
 	backupPath := filepath.Join(dir, p.Backup)
 	if p.Backup == "" {
-		// latest backup
 		entries, _ := os.ReadDir(dir)
 		var latest string
 		var latestTs time.Time
@@ -447,10 +567,7 @@ func (a *Agent) handleRestoreBackup(cmd *wsCmd) (map[string]interface{}, string)
 			if !strings.HasPrefix(e.Name(), prefix) {
 				continue
 			}
-			info, err := e.Info()
-			if err != nil {
-				continue
-			}
+			info, _ := e.Info()
 			if info.ModTime().After(latestTs) {
 				latestTs = info.ModTime()
 				latest = e.Name()
@@ -461,18 +578,14 @@ func (a *Agent) handleRestoreBackup(cmd *wsCmd) (map[string]interface{}, string)
 		}
 		backupPath = filepath.Join(dir, latest)
 	}
-
 	data, err := os.ReadFile(backupPath)
 	if err != nil {
 		return nil, fmt.Sprintf("read backup %s: %v", backupPath, err)
 	}
-
-	// backup current before restore
 	currentBackup := backupFilePath(path)
 	if existing, err := os.ReadFile(path); err == nil {
 		os.WriteFile(currentBackup, existing, 0644)
 	}
-
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return nil, fmt.Sprintf("restore %s: %v", path, err)
 	}
@@ -481,7 +594,7 @@ func (a *Agent) handleRestoreBackup(cmd *wsCmd) (map[string]interface{}, string)
 
 // --- upgrade ---
 
-func (a *Agent) handleUpgradeAgent(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleUpgradeAgent(payload []byte) (map[string]interface{}, string) {
 	exe, _ := os.Executable()
 	oldVersion := a.cfg.Version
 
@@ -512,8 +625,7 @@ func (a *Agent) handleUpgradeAgent(cmd *wsCmd) (map[string]interface{}, string) 
 		return nil, fmt.Sprintf("downloaded binary too small (%d bytes)", n)
 	}
 
-	// validate new binary is executable
-	test := exec.Command(tmpPath, "--help")
+	test := exec.Command(tmpPath, "--version")
 	test.Stdout = io.Discard
 	test.Stderr = io.Discard
 	if err := test.Run(); err != nil {
@@ -533,8 +645,7 @@ func (a *Agent) handleUpgradeAgent(cmd *wsCmd) (map[string]interface{}, string) 
 		return nil, fmt.Sprintf("install new: %v", err)
 	}
 
-	// exit so service manager restarts with new binary
-	go func() { time.Sleep(100 * time.Millisecond); os.Exit(0) }()
+	go func() { time.Sleep(200 * time.Millisecond); os.Exit(0) }()
 
 	return map[string]interface{}{
 		"old_version": oldVersion,
@@ -545,19 +656,14 @@ func (a *Agent) handleUpgradeAgent(cmd *wsCmd) (map[string]interface{}, string) 
 	}, ""
 }
 
-func (a *Agent) handleUpgradeTool(cmd *wsCmd) (map[string]interface{}, string) {
+func (a *Agent) handleUpgradeTool(payload []byte) (map[string]interface{}, string) {
 	var p struct {
 		Tool    string `json:"tool"`
 		Version string `json:"version"`
 	}
-	json.Unmarshal(cmd.Payload, &p)
-	// tool upgrades are managed externally; we just report version
-	out, err := exec.Command(p.Tool, "--version").CombinedOutput()
-	oldVersion := ""
-	if err == nil {
-		oldVersion = strings.TrimSpace(string(out))
-	}
-	return map[string]interface{}{"tool": p.Tool, "old_version": oldVersion, "new_version": p.Version}, ""
+	json.Unmarshal(payload, &p)
+	out, _ := exec.Command(p.Tool, "--version").CombinedOutput()
+	return map[string]interface{}{"tool": p.Tool, "old_version": firstLine(string(out)), "new_version": p.Version}, ""
 }
 
 // --- helpers ---
@@ -575,19 +681,10 @@ func detectTools() []map[string]interface{} {
 			}
 		}
 		tools = append(tools, map[string]interface{}{
-			"name":      t,
-			"installed": installed,
-			"version":   version,
-			"path":      path,
+			"name": t, "installed": installed, "version": version, "path": path,
 		})
 	}
 	return tools
-}
-
-func (a *Agent) saveState() {
-	state := map[string]interface{}{"server_id": a.serverID, "agent_token": a.agentTok}
-	data, _ := json.Marshal(state)
-	os.WriteFile(filepath.Join(a.dir, "state.json"), data, 0600)
 }
 
 func (a *Agent) ensureCredSourcing() {
@@ -610,33 +707,20 @@ func (a *Agent) ensureCredSourcing() {
 	}
 }
 
-func shellEscape(s string) string {
-	return strings.ReplaceAll(s, "'", "'\"'\"'")
-}
-
+func shellEscape(s string) string { return strings.ReplaceAll(s, "'", "'\"'\"'") }
 func mapKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
+	for k := range m { keys = append(keys, k) }
 	return keys
 }
-
 func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return s[:i]
-	}
+	if i := strings.IndexByte(s, '\n'); i >= 0 { return s[:i] }
 	return s
 }
-
 func formatForTool(tool string) string {
-	if tool == "codex" {
-		return "toml"
-	}
+	if tool == "codex" { return "toml" }
 	return "json"
 }
-
-// fingerprint for audit comparison
 func fingerprint(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])[:12]
