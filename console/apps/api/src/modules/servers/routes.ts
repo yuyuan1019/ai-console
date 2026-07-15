@@ -1,6 +1,8 @@
 import type { FastifyInstance } from "fastify"
 import { db } from "../../core/db"
+import { decrypt } from "../../core/crypto"
 import { audit } from "../../core/audit"
+import { generateConfig } from "../../core/config"
 import { createAgentTask } from "../agent/routes"
 import type { AuthUser } from "../../core/constants"
 
@@ -145,6 +147,37 @@ export function registerServersRoutes(app: FastifyInstance) {
         .prepare("SELECT id FROM provider_keys WHERE id=? AND provider_id=? AND enabled=1")
         .get(keyId, providerId) as any
       if (!key) return reply.code(404).send({ error: "key not found" })
+
+      if (tool === "opencode") {
+        const keyDetail = db
+          .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.default_model_id, k.group_name,
+                    p.base_url, p.name AS provider_name
+             FROM provider_keys k JOIN providers p ON p.id=k.provider_id
+             WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
+          .get(keyId, providerId) as any
+        if (!keyDetail?.encrypted_value) return reply.code(400).send({ error: "oauth key has no secret" })
+
+        const secret = decrypt(keyDetail.encrypted_value, keyDetail.iv)
+        if (!secret) return reply.code(400).send({ error: "decrypt failed" })
+
+        const modelId = keyDetail.default_model_id ||
+          (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id LIMIT 1").get(providerId) as any)?.model_id
+        if (!modelId) return reply.code(400).send({ error: "no model available for this provider" })
+
+        const result = generateConfig("opencode", {
+          base_url: keyDetail.base_url || "",
+          api_key: secret,
+          model: modelId,
+          api_format: keyDetail.api_format,
+          provider_name: keyDetail.provider_name,
+          group_name: keyDetail.group_name,
+        })
+        return reply.code(201).send(createAgentTask(req.params.id, user.id, "write_config", {
+          tool: "opencode",
+          format: result.format,
+          content: result.content,
+        }))
+      }
 
       return reply.code(201).send(createAgentTask(req.params.id, user.id, "set_credential", { tool, provider_id: providerId, key_id: keyId }))
     }

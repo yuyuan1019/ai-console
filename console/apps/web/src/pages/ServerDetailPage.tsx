@@ -150,7 +150,10 @@ export function ServerDetailPage() {
     }
     if (tool === "codex") return { OPENAI_API_KEY: "sk-***" }
     if (tool === "gemini") return { GEMINI_API_KEY: "sk-***", GOOGLE_GEMINI_BASE_URL: baseUrl }
-    if (tool === "opencode") return {}
+    if (tool === "opencode") {
+      const modelId = k.default_model_id || credProviderDetail?.models[0]?.model_id || "—"
+      return { "配置文件": "~/.config/opencode/opencode.json", "使用模型": modelId }
+    }
     return {}
   }, [tool, credKeyId, credKeys, credProviderDetail])
 
@@ -341,7 +344,6 @@ export function ServerDetailPage() {
                 <div className="flex items-center justify-between">
                   <div className="font-medium">凭据下发</div>
                 <div className="flex items-center gap-2">
-                  {tool !== "opencode" && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -349,9 +351,8 @@ export function ServerDetailPage() {
                     onClick={() => setCredential.mutate({ tool, provider_id: credProviderId, key_id: credKeyId })}
                   >
                     {setCredential.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Key className="mr-1 h-3 w-3" />}
-                    下发凭据
+                    {tool === "opencode" ? "下发配置" : "下发凭据"}
                   </Button>
-                  )}
                   <Button
                     size="sm"
                     variant="ghost"
