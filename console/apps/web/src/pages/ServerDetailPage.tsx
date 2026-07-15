@@ -148,7 +148,7 @@ export function ServerDetailPage() {
     if (tool === "claude") {
       return { ANTHROPIC_AUTH_TOKEN: "sk-***", ANTHROPIC_BASE_URL: baseUrl }
     }
-    if (tool === "codex") return {}
+    if (tool === "codex") return { OPENAI_API_KEY: "sk-***" }
     if (tool === "gemini") return { GEMINI_API_KEY: "sk-***", GOOGLE_GEMINI_BASE_URL: baseUrl }
     if (tool === "opencode") return {}
     return {}
@@ -341,7 +341,7 @@ export function ServerDetailPage() {
                 <div className="flex items-center justify-between">
                   <div className="font-medium">凭据下发</div>
                 <div className="flex items-center gap-2">
-                  {tool !== "codex" && tool !== "opencode" && (
+                  {tool !== "opencode" && (
                   <Button
                     size="sm"
                     variant="outline"

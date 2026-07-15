@@ -439,10 +439,31 @@ func (a *Agent) credFile(tool string) string {
 	return filepath.Join(a.credsDir, tool+".sh")
 }
 
+// ponytail: codex stores its key in ~/.codex/auth.json (codex-native, env-free).
+// config.toml uses requires_openai_auth=true so codex reads the key from here.
+func (a *Agent) codexAuthFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".codex", "auth.json")
+}
+
 func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 	var p setCredPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("bad payload: %v", err)
+	}
+
+	if p.Tool == "codex" {
+		key := p.Credentials["OPENAI_API_KEY"]
+		if key == "" {
+			return nil, "missing OPENAI_API_KEY for codex"
+		}
+		authJSON, _ := json.Marshal(map[string]string{"OPENAI_API_KEY": key})
+		path := a.codexAuthFile()
+		os.MkdirAll(filepath.Dir(path), 0755)
+		if err := os.WriteFile(path, authJSON, 0600); err != nil {
+			return nil, fmt.Sprintf("write %s: %v", path, err)
+		}
+		return map[string]interface{}{"path": path, "format": "auth.json", "keys": []string{"OPENAI_API_KEY"}}, ""
 	}
 
 	var lines []string
@@ -469,12 +490,29 @@ func (a *Agent) handleRemoveCred(payload []byte) (map[string]interface{}, string
 	result := map[string]interface{}{}
 	var removed []string
 
-	path := a.credFile(p.Tool)
-	if _, err := os.Stat(path); err == nil {
-		if err := os.Remove(path); err != nil {
-			return nil, fmt.Sprintf("remove %s: %v", path, err)
+	if p.Tool == "codex" {
+		authPath := a.codexAuthFile()
+		if _, err := os.Stat(authPath); err == nil {
+			if err := os.Remove(authPath); err != nil {
+				return nil, fmt.Sprintf("remove %s: %v", authPath, err)
+			}
+			removed = append(removed, authPath)
 		}
-		removed = append(removed, path)
+		// also clean up legacy creds/codex.sh from older agent versions
+		if legacy := a.credFile("codex"); legacy != authPath {
+			if _, err := os.Stat(legacy); err == nil {
+				os.Remove(legacy)
+				removed = append(removed, legacy)
+			}
+		}
+	} else {
+		path := a.credFile(p.Tool)
+		if _, err := os.Stat(path); err == nil {
+			if err := os.Remove(path); err != nil {
+				return nil, fmt.Sprintf("remove %s: %v", path, err)
+			}
+			removed = append(removed, path)
+		}
 	}
 
 	for _, k := range p.EnvKeysToRemove {

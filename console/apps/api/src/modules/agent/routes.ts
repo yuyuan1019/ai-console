@@ -9,7 +9,6 @@ import { authFromRequest } from "../../middleware/auth"
 import type { AuthUser } from "../../core/constants"
 import path from "node:path"
 import fs from "node:fs"
-import { withOpenAiV1 } from "../../core/config"
 import { LINUX_INSTALL_SH } from "./installSh"
 
 export const onlineAgents = new Map<string, { ws: any; lastHeartbeat: number }>()
@@ -189,9 +188,9 @@ function materializeTaskPayload(action: string, payloadJson: string) {
     credentials["ANTHROPIC_AUTH_TOKEN"] = secret
     credentials["ANTHROPIC_BASE_URL"] = baseUrl
   } else if (tool === "codex") {
-    // ponytail: codex key now lives in config.toml (experimental_bearer_token,
-    // set via write_config). No env vars - OPENAI_API_KEY/OPENAI_BASE_URL would
-    // leak into opencode. set_credential is a no-op for codex (UI button removed).
+    // ponytail: codex key goes to ~/.codex/auth.json (agent writes it).
+    // No OPENAI_BASE_URL env var - base_url is in config.toml. Env-free.
+    credentials["OPENAI_API_KEY"] = secret
   } else if (tool === "gemini") {
     credentials["GEMINI_API_KEY"] = secret
     credentials["GOOGLE_GEMINI_BASE_URL"] = baseUrl
