@@ -33,7 +33,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
 
       if (tool === "opencode" && keyEntries.length > 1) {
         const sorted = [...keyEntries].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0))
-        const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; apiFormat?: string | null }> = []
+        const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; models?: string[]; apiFormat?: string | null }> = []
         for (const ke of sorted) {
           const key = db
             .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.group_name, p.base_url, p.name AS provider_name
@@ -48,11 +48,13 @@ export function registerBatchRoutes(app: FastifyInstance) {
           const providerLabel = key.provider_name || "provider"
           const groupLabel = key.group_name ? `_${key.group_name}` : ""
           const providerId = `${providerLabel}${groupLabel}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
+          const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(ke.providerId) as any[]).map(r => r.model_id)
           entries.push({
             providerId, providerLabel,
             openAiBaseUrl: withOpenAiV1(baseUrl),
             apiKey: secret,
             model: ke.modelId,
+            models: allModels,
             apiFormat: key.api_format,
           })
         }
@@ -77,10 +79,13 @@ export function registerBatchRoutes(app: FastifyInstance) {
       const secret = decrypt(key.encrypted_value, key.iv)
       if (!secret) return reply.code(400).send({ error: "decrypt failed" })
 
+      const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(providerId) as any[]).map(r => r.model_id)
+
       const result = generateConfig(tool, {
         base_url: key.base_url || "",
         api_key: secret,
         model: modelId,
+        models: allModels,
         api_format: key.api_format,
         raw_config_json: key.raw_config_json,
         provider_name: key.provider_name,
@@ -129,7 +134,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
 
     if (tool === "opencode" && keyEntries.length > 1) {
       const sorted = [...keyEntries].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0))
-      const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; apiFormat?: string | null }> = []
+      const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; models?: string[]; apiFormat?: string | null }> = []
       for (const ke of sorted) {
         const key = db
           .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.group_name, p.base_url, p.name AS provider_name
@@ -143,11 +148,13 @@ export function registerBatchRoutes(app: FastifyInstance) {
         const providerLabel = key.provider_name || "provider"
         const groupLabel = key.group_name ? `_${key.group_name}` : ""
         const providerId = `${providerLabel}${groupLabel}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
+        const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(ke.providerId) as any[]).map(r => r.model_id)
         entries.push({
           providerId, providerLabel,
           openAiBaseUrl: withOpenAiV1(baseUrl),
           apiKey: secret,
           model: ke.modelId,
+          models: allModels,
           apiFormat: key.api_format,
         })
       }
@@ -169,8 +176,10 @@ export function registerBatchRoutes(app: FastifyInstance) {
       if (!key) return reply.code(404).send({ error: "key not found" })
       const secret = decrypt(key.encrypted_value, key.iv)
       if (!secret) return reply.code(400).send({ error: "decrypt failed" })
+      const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(providerId) as any[]).map(r => r.model_id)
       const generated = generateConfig(tool, {
         base_url: key.base_url || "", api_key: secret, model: modelId,
+        models: allModels,
         api_format: key.api_format, raw_config_json: key.raw_config_json,
         provider_name: key.provider_name,
         group_name: key.group_name,

@@ -191,6 +191,7 @@ export function generateConfig(tool: string, opts: {
   base_url: string
   api_key: string
   model: string
+  models?: string[]
   api_format?: string | null
   raw_config_json?: string | null
   provider_name?: string | null
@@ -270,7 +271,7 @@ export function generateConfig(tool: string, opts: {
   }
 
   if (tool === "opencode") {
-    const config = buildOpenCodeConfig({ providerId, providerLabel, openAiBaseUrl, apiKey, model, apiFormat: opts.api_format, raw })
+    const config = buildOpenCodeConfig({ providerId, providerLabel, openAiBaseUrl, apiKey, model, models: opts.models, apiFormat: opts.api_format, raw })
     return { content: JSON.stringify(config, null, 2), format: "json" }
   }
 
@@ -283,16 +284,20 @@ export function buildOpenCodeConfig(entry: {
   openAiBaseUrl: string
   apiKey: string
   model: string
+  models?: string[]
   apiFormat?: string | null
   raw?: any
 }): any {
   const api = entry.apiFormat === "anthropic" ? "anthropic" : "openai"
   const config: any = entry.raw ? { ...entry.raw } : {}
   if (!config.provider) config.provider = {}
+  const modelList = entry.models && entry.models.length > 0 ? entry.models : [entry.model]
+  const models: Record<string, any> = {}
+  for (const m of modelList) models[m] = {}
   config.provider[entry.providerId] = {
     api,
     options: { baseURL: entry.openAiBaseUrl, apiKey: entry.apiKey },
-    models: { [entry.model]: {} },
+    models,
   }
   config.model = `${entry.providerId}/${entry.model}`
   if (!config.$schema) config.$schema = "https://opencode.ai/config.json"
@@ -306,6 +311,7 @@ export function mergeOpenCodeConfig(entries: {
   openAiBaseUrl: string
   apiKey: string
   model: string
+  models?: string[]
   apiFormat?: string | null
 }[]): any {
   const config: any = { provider: {} }

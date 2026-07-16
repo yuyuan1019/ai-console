@@ -164,10 +164,13 @@ export function registerServersRoutes(app: FastifyInstance) {
           (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id LIMIT 1").get(providerId) as any)?.model_id
         if (!modelId) return reply.code(400).send({ error: "no model available for this provider" })
 
+        const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(providerId) as any[]).map(r => r.model_id)
+
         const result = generateConfig("opencode", {
           base_url: keyDetail.base_url || "",
           api_key: secret,
           model: modelId,
+          models: allModels,
           api_format: keyDetail.api_format,
           provider_name: keyDetail.provider_name,
           group_name: keyDetail.group_name,
