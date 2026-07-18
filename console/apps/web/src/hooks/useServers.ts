@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import { api } from "@/lib/api"
 import { subscribe } from "@/lib/ws"
 
@@ -41,6 +41,25 @@ export function useServerTasks(id: string | undefined) {
     return subscribe(`server:${id}:tasks`, () => {
       void queryClient.invalidateQueries({ queryKey: ["server", id, "tasks"] })
       void queryClient.invalidateQueries({ queryKey: ["server", id] })
+    })
+  }, [id, queryClient])
+  return query
+}
+
+export function useLatestConfig(id: string | undefined, tool: string) {
+  const queryClient = useQueryClient()
+  const toolRef = useRef(tool)
+  toolRef.current = tool
+  const query = useQuery({
+    queryKey: ["server", id, "config", tool],
+    queryFn: () => api.getLatestConfig(id!, tool),
+    enabled: !!id && !!tool,
+    refetchInterval: 10000,
+  })
+  useEffect(() => {
+    if (!id) return
+    return subscribe(`server:${id}:tasks`, () => {
+      void queryClient.invalidateQueries({ queryKey: ["server", id, "config", toolRef.current] })
     })
   }, [id, queryClient])
   return query
@@ -88,6 +107,7 @@ export function useReadServerConfig(id: string | undefined) {
     mutationFn: (tool: string) => api.readServerConfig(id!, tool),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["server", id, "tasks"] })
+      void queryClient.invalidateQueries({ queryKey: ["server", id, "config"] })
     },
   })
 }
@@ -98,6 +118,7 @@ export function useWriteServerConfig(id: string | undefined) {
     mutationFn: (input: { tool: string; format: string; content: string }) => api.writeServerConfig(id!, input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["server", id, "tasks"] })
+      void queryClient.invalidateQueries({ queryKey: ["server", id, "config"] })
     },
   })
 }
@@ -118,6 +139,7 @@ export function useRestoreConfigBackup(id: string | undefined) {
     mutationFn: (input: { tool: string; backup: string }) => api.restoreConfigBackup(id!, input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["server", id, "tasks"] })
+      void queryClient.invalidateQueries({ queryKey: ["server", id, "config"] })
     },
   })
 }

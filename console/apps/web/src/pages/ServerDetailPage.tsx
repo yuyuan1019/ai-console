@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useUpdateServer } from "@/hooks/useServers"
+import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useLatestConfig, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useUpdateServer } from "@/hooks/useServers"
 import { useProviders, useProvider } from "@/hooks/useProviders"
 
 function formatTs(value: number | null) {
@@ -99,16 +99,14 @@ export function ServerDetailPage() {
   const [loadedTool, setLoadedTool] = useState(tool)
   const [activeTab, setActiveTab] = useState("overview")
 
-  const latestReadContent = useMemo(() =>
-    tasks
-      .filter((t) => t.action === "read_config" && t.status === "done" && JSON.parse(t.payload_json || "{}").tool === tool && t.result_json)
-      .map((t) => JSON.parse(t.result_json || "{}").content as string | undefined)[0] || ""
-  , [tasks, tool])
+  const latestConfigQuery = useLatestConfig(id, tool)
+  const latestReadContent = latestConfigQuery.data?.content || ""
 
   useEffect(() => {
+    if (activeTab !== "configs") return
     setContent(latestReadContent || "")
     setLoadedTool(tool)
-  }, [latestReadContent, tool])
+  }, [latestReadContent, tool, activeTab])
 
   const latestBackups = useMemo(() =>
     tasks
@@ -542,11 +540,19 @@ export function ServerDetailPage() {
                 </div>
               )}
 
+              {latestConfigQuery.isError && (
+                <p className="text-xs text-destructive">加载配置失败：{String(latestConfigQuery.error)}</p>
+              )}
+              {latestConfigQuery.isLoading && (
+                <p className="text-xs text-muted-foreground">正在加载配置…</p>
+              )}
+
               <textarea
                 value={content}
                 onChange={(e) => setContent(e.target.value)}
                 placeholder="点击「读取配置」自动载入，或直接粘贴配置内容。"
                 className="min-h-[400px] w-full resize-y rounded-md border border-input bg-background p-3 font-mono text-xs"
+                disabled={latestConfigQuery.isLoading}
               />
 
               {diffStats && (

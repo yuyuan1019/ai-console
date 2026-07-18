@@ -309,6 +309,17 @@ export interface ConfigPreview {
   format: string
 }
 
+export interface LatestConfigResponse {
+  tool: string
+  format: string
+  version: number
+  source: string
+  updated_by: string
+  updated_at: number
+  content_sha256: string | null
+  content: string
+}
+
 export interface BatchProgressItem {
   server_id: string
   server_name: string
@@ -361,6 +372,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ tool }),
     }),
+  getLatestConfig: (id: string, tool: string) =>
+    request<LatestConfigResponse>(`/servers/${id}/configs/latest?tool=${encodeURIComponent(tool)}`),
   writeServerConfig: (id: string, input: { tool: string; format: string; content: string }) =>
     request<AgentTask>(`/servers/${id}/configs/write`, {
       method: "POST",
