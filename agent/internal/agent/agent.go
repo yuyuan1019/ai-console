@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -14,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -22,6 +24,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// ponytail (BUG-05, 2.0): protocol version is hard-coded to 2. The server
+// refuses any other value at enroll/heartbeat/ws-handshake. No back-compat
+// fallback lives in this binary.
+const ProtocolVersion = 2
+
 type Config struct {
 	Server  string
 	Token   string
@@ -29,18 +36,21 @@ type Config struct {
 }
 
 type stateData struct {
-	Server     string `json:"server"`
-	ServerID   string `json:"server_id"`
-	AgentToken string `json:"agent_token"`
+	Server          string `json:"server"`
+	ServerID        string `json:"server_id"`
+	AgentToken      string `json:"agent_token"`
+	AgentInstanceID string `json:"agent_instance_id"`
 }
 
 type Agent struct {
-	cfg      *Config
-	serverID string
-	agentTok string
-	dir      string
-	credsDir string
-	mu       sync.Mutex
+	cfg        *Config
+	serverID   string
+	agentTok   string
+	instanceID string
+	dir        string
+	credsDir   string
+	journal    *taskJournal
+	mu         sync.Mutex
 }
 
 type enrollResp struct {
@@ -63,7 +73,7 @@ type setCredPayload struct {
 }
 
 type removeCredPayload struct {
-	Tool           string   `json:"tool"`
+	Tool            string   `json:"tool"`
 	EnvKeysToRemove []string `json:"env_keys_to_remove"`
 }
 
@@ -78,23 +88,34 @@ type restTaskResponse struct {
 }
 
 type restTask struct {
-	ID      string          `json:"id"`
-	Action  string          `json:"action"`
-	Payload json.RawMessage `json:"payload"`
-}
-
-type restResultBody struct {
-	Ok     bool            `json:"ok"`
-	Result json.RawMessage `json:"result"`
-	Error  string          `json:"error"`
+	ID        string          `json:"id"`
+	Action    string          `json:"action"`
+	Nonce     string          `json:"nonce"`
+	ExpiresAt int64           `json:"expires_at"`
+	Payload   json.RawMessage `json:"payload"`
 }
 
 func New(cfg *Config) (*Agent, error) {
 	home, _ := os.UserHomeDir()
 	dir := filepath.Join(home, ".ai-console-agent")
 	credsDir := filepath.Join(dir, "creds")
-	os.MkdirAll(credsDir, 0755)
-	return &Agent{cfg: cfg, dir: dir, credsDir: credsDir}, nil
+	// ponytail (BUG-01): private dirs. 0700 is required so peer users on the
+	// host can't list creds/*.sh or read the state.json that pins server ID
+	// and long-lived agent token. MkdirAll is idempotent; if it fails we still
+	// return the Agent so the caller can log/exit — permission enforcement is
+	// re-attempted at every startup via enforceOwnedPathPermissions().
+	os.MkdirAll(dir, 0700)
+	os.MkdirAll(credsDir, 0700)
+	_ = os.Chmod(dir, 0700)
+	_ = os.Chmod(credsDir, 0700)
+	journal, jerr := openTaskJournal(filepath.Join(dir, "task-journal.json"))
+	if jerr != nil {
+		// ponytail (BUG-05): journal load errors are logged but don't abort;
+		// journal is best-effort de-dup, not a correctness gate. Fresh install
+		// will start with an empty journal and rebuild the file on first write.
+		log.Printf("task-journal load: %v (continuing with empty journal)", jerr)
+	}
+	return &Agent{cfg: cfg, dir: dir, credsDir: credsDir, journal: journal}, nil
 }
 
 func (a *Agent) ServerID() string { return a.serverID }
@@ -113,6 +134,7 @@ func (a *Agent) loadState() bool {
 	}
 	a.serverID = s.ServerID
 	a.agentTok = s.AgentToken
+	a.instanceID = s.AgentInstanceID
 	if s.Server != "" && a.cfg.Server == "" {
 		a.cfg.Server = s.Server
 	}
@@ -120,33 +142,79 @@ func (a *Agent) loadState() bool {
 	return true
 }
 
-func (a *Agent) saveState() {
-	state := stateData{
-		Server:     a.cfg.Server,
-		ServerID:   a.serverID,
-		AgentToken: a.agentTok,
+func (a *Agent) saveState() error {
+	if a.instanceID == "" {
+		// ponytail (BUG-08): every agent must persist a UUID before it can
+		// enroll. Generated on first startup and locked to state.json.
+		a.instanceID = newUUIDv4()
 	}
-	data, _ := json.Marshal(state)
-	os.WriteFile(filepath.Join(a.dir, "state.json"), data, 0600)
+	state := stateData{
+		Server:          a.cfg.Server,
+		ServerID:        a.serverID,
+		AgentToken:      a.agentTok,
+		AgentInstanceID: a.instanceID,
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		return fmt.Errorf("marshal state: %w", err)
+	}
+	// ponytail (BUG-08): atomic + 0600. Bare WriteFile would leave a torn
+	// state.json if the process crashes mid-write; a partial JSON also breaks
+	// the instance-id locking. writeFileAtomic handles the tempfile+sync+
+	// rename dance so recovery is deterministic.
+	if err := writeFileAtomic(filepath.Join(a.dir, "state.json"), data, 0600); err != nil {
+		return fmt.Errorf("save state: %w", err)
+	}
+	return nil
+}
+
+// newUUIDv4 returns a random UUID (RFC 4122 §4.4). We use crypto/rand instead
+// of pulling in a UUID module to keep the agent binary standard-library-only.
+func newUUIDv4() string {
+	var b [16]byte
+	_, err := rand.Read(b[:])
+	if err != nil {
+		// crypto/rand should never fail on supported platforms; a fallback
+		// pseudorandom UUID would violate BUG-08's uniqueness contract, so
+		// panic here so the caller sees the failure and refuses to enroll.
+		panic(fmt.Sprintf("crypto/rand failed: %v", err))
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant RFC 4122
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 func (a *Agent) Enroll(ctx context.Context) error {
 	if a.loadState() && a.cfg.Token == "" {
+		// ponytail (BUG-08): if state.json is missing agent_instance_id
+		// (fresh install may pre-date it), persist a new UUID now.
+		if a.instanceID == "" {
+			if err := a.saveState(); err != nil {
+				return fmt.Errorf("persist instance id: %w", err)
+			}
+		}
 		return nil
 	}
 	if a.cfg.Token == "" {
 		return fmt.Errorf("no enroll token and no saved state")
 	}
 
+	// ponytail (BUG-08): mint the instance UUID BEFORE enrolling so the
+	// enroll body carries it; server rejects enroll without agent_instance_id.
+	if a.instanceID == "" {
+		a.instanceID = newUUIDv4()
+	}
 	host, _ := os.Hostname()
 	body := map[string]interface{}{
-		"token":    a.cfg.Token,
-		"hostname": host,
-		"os":       runtime.GOOS,
-		"arch":     runtime.GOARCH,
-		"host":     host,
-		"version":  a.cfg.Version,
-		"tools":    detectTools(),
+		"token":             a.cfg.Token,
+		"hostname":          host,
+		"os":                runtime.GOOS,
+		"arch":              runtime.GOARCH,
+		"host":              host,
+		"version":           a.cfg.Version,
+		"protocol_version":  ProtocolVersion,
+		"agent_instance_id": a.instanceID,
+		"tools":             detectTools(),
 	}
 	data, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(ctx, "POST", a.cfg.Server+"/agent/enroll", bytes.NewReader(data))
@@ -166,7 +234,11 @@ func (a *Agent) Enroll(ctx context.Context) error {
 	}
 	a.serverID = r.ServerID
 	a.agentTok = r.AgentToken
-	a.saveState()
+	// ponytail (BUG-08): persist state before returning. Enroll consumed a
+	// one-time token; if we drop the agent token now nothing recovers.
+	if err := a.saveState(); err != nil {
+		return fmt.Errorf("enroll persist state: %w", err)
+	}
 	log.Printf("enrolled: server_id=%s", a.serverID)
 	return nil
 }
@@ -175,6 +247,11 @@ func (a *Agent) Run(ctx context.Context) error {
 	if err := a.Enroll(ctx); err != nil {
 		return err
 	}
+
+	// ponytail (BUG-01): tighten permissions on known Agent-owned paths every
+	// startup. Not a one-shot migration — idempotent, symlink-safe (Lstat), and
+	// no delete/move/rewrite. Recovers from partial failures on a later boot.
+	a.enforceOwnedPathPermissions()
 
 	for {
 		select {
@@ -197,6 +274,103 @@ func (a *Agent) Run(ctx context.Context) error {
 	}
 }
 
+// enforceOwnedPathPermissions runs at every startup. It only chmods known
+// files/dirs; never deletes, moves, renames or rewrites content. It uses
+// os.Lstat to avoid following symlinks — an attacker who could plant a
+// symlink inside a known dir must not be able to redirect chmod onto a file
+// outside the known set. Failures are logged but do not block startup, and
+// the next startup will retry each item.
+//
+// Files considered "owned" by the Agent for the purposes of this scan:
+//   - ~/.ai-console-agent (dir) and creds/ subdir     → 0700
+//   - creds/*.sh                                       → 0600
+//   - state.json, task-journal.json                    → 0600
+//   - each tool's config file (~/.codex/config.toml, ~/.claude/settings.json,
+//     ~/.gemini/settings.json, ~/.config/opencode/opencode.json)
+//     and its parent directory                         → 0600 / 0700
+//   - ~/.codex/auth.json                               → 0600
+//   - .<basename>.bak.* files inside each config dir   → 0600
+//
+// The purpose is to close the historical 0644 permission surface without
+// touching content. Symlinks and non-regular files are skipped.
+func (a *Agent) enforceOwnedPathPermissions() {
+	chmodFile := func(path string, mode os.FileMode) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return // never follow symlinks
+		}
+		if !info.Mode().IsRegular() {
+			return
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			log.Printf("perm fixup: chmod %s -> %04o failed: %v", path, mode, err)
+		}
+	}
+	chmodDir := func(path string, mode os.FileMode) {
+		info, err := os.Lstat(path)
+		if err != nil {
+			return
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return
+		}
+		if !info.IsDir() {
+			return
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			log.Printf("perm fixup: chmod dir %s -> %04o failed: %v", path, mode, err)
+		}
+	}
+	chmodBackups := func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if !strings.Contains(name, ".bak.") {
+				continue
+			}
+			chmodFile(filepath.Join(dir, name), 0600)
+		}
+	}
+
+	// Agent-private paths.
+	chmodDir(a.dir, 0700)
+	chmodDir(a.credsDir, 0700)
+	chmodFile(filepath.Join(a.dir, "state.json"), 0600)
+	chmodFile(filepath.Join(a.dir, "task-journal.json"), 0600)
+	if entries, err := os.ReadDir(a.credsDir); err == nil {
+		for _, e := range entries {
+			if strings.HasSuffix(e.Name(), ".sh") {
+				chmodFile(filepath.Join(a.credsDir, e.Name()), 0600)
+			}
+		}
+	}
+
+	// Tool config paths + backups. Skip if the dir doesn't exist yet (nothing
+	// to tighten on a fresh host).
+	for _, tool := range []string{"codex", "claude", "gemini", "opencode"} {
+		cfgPath := toolConfigPath(tool)
+		if cfgPath == "" {
+			continue
+		}
+		dir := filepath.Dir(cfgPath)
+		if _, err := os.Lstat(dir); err != nil {
+			continue
+		}
+		chmodDir(dir, 0700)
+		chmodFile(cfgPath, 0600)
+		chmodBackups(dir)
+	}
+
+	// Codex secret file lives next to config.toml.
+	chmodFile(a.codexAuthFile(), 0600)
+}
+
 func (a *Agent) connectWS(ctx context.Context) error {
 	u, err := url.Parse(a.cfg.Server)
 	if err != nil {
@@ -206,9 +380,15 @@ func (a *Agent) connectWS(ctx context.Context) error {
 	if u.Scheme == "https" {
 		scheme = "wss"
 	}
-	wsURL := fmt.Sprintf("%s://%s/agent/ws?token=%s", scheme, u.Host, a.agentTok)
+	// ponytail (BUG-05, 2.0): agent token goes in Authorization header, NOT
+	// in the URL query. Reverse-proxy access logs, browser history and error
+	// dumps commonly retain query strings; a leaked long-lived agent token is
+	// full remote control.
+	wsURL := fmt.Sprintf("%s://%s/agent/ws", scheme, u.Host)
+	header := http.Header{}
+	header.Set("Authorization", "Bearer "+a.agentTok)
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -226,8 +406,32 @@ func (a *Agent) connectWS(ctx context.Context) error {
 	})
 	conn.SetReadDeadline(time.Now().Add(90 * time.Second))
 
+	// Initial protocol-2 heartbeat so the server can record protocol_version
+	// on the servers row before dispatching backlog. Without this the server's
+	// backlog flush would find agent_protocol_version=NULL (impossible under
+	// 019's CHECK, but defensive) and skip us.
+	a.sendHeartbeat(conn)
+
 	heartbeat := time.NewTicker(25 * time.Second)
 	defer heartbeat.Stop()
+
+	// ponytail (BUG-05): task worker channel + single consumer goroutine. Old
+	// design spawned an unbounded per-command goroutine, so two writes racing
+	// through handleWriteConfig on the same tool file could interleave. 2.0:
+	// each command executes sequentially. Buffer 64 is a soft cap; Console
+	// enforces the "one running per server" invariant so the queue normally
+	// stays at 0-1.
+	cmdQueue := make(chan wsCmd, 64)
+	workerDone := make(chan struct{})
+	// Lease ticker tracks the currently-executing task so the worker can
+	// renew via WS cmd_lease every 45s. Runs on the worker goroutine so it
+	// naturally stops between tasks.
+	go func() {
+		defer close(workerDone)
+		for cmd := range cmdQueue {
+			a.handleCmdWSWithLease(ctx, conn, &cmd)
+		}
+	}()
 
 	done := make(chan error, 1)
 	go func() {
@@ -242,13 +446,19 @@ func (a *Agent) connectWS(ctx context.Context) error {
 			if err := json.Unmarshal(msg, &cmd); err != nil {
 				continue
 			}
-			if cmd.Type == "ack" {
+			if cmd.Type == "ack" || cmd.Type == "cmd_lease_ack" || cmd.Type == "cmd_result_rejected" {
 				continue
 			}
 			if cmd.Type == "cmd" {
-				go func(cmd wsCmd) {
-					a.handleCmdWS(conn, &cmd)
-				}(cmd)
+				select {
+				case cmdQueue <- cmd:
+				default:
+					// ponytail (BUG-05): queue full is a hard signal. Report
+					// a nonce-bound failure so Console can retry (attempt_count
+					// increments) rather than silently drop a command that
+					// would then hit the reaper.
+					a.sendResult(conn, &cmd, false, nil, "agent queue full")
+				}
 			}
 		}
 	}()
@@ -256,11 +466,17 @@ func (a *Agent) connectWS(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
+			close(cmdQueue)
+			<-workerDone
 			return ctx.Err()
 		case err := <-done:
+			close(cmdQueue)
+			<-workerDone
 			return err
 		case <-heartbeat.C:
 			if err := a.wsWritePing(conn); err != nil {
+				close(cmdQueue)
+				<-workerDone
 				return err
 			}
 			a.sendHeartbeat(conn)
@@ -302,16 +518,28 @@ func (a *Agent) pollRest(ctx context.Context) {
 
 	task := tr.Task
 	log.Printf("rest task: %s %s", task.ID, task.Action)
+	// ponytail (BUG-05): journal-hit fast-path also here — REST claim can hit
+	// a task the agent already completed if the previous result POST failed
+	// after successful side-effects.
+	if cached, ok := a.journalGet(task.ID); ok {
+		a.restReport(ctx, task.ID, task.Nonce, cached.Ok, cached.Result, cached.Error)
+		return
+	}
 	result, errStr := a.handleCmd(task.Action, task.Payload)
 	ok := errStr == ""
+	a.journalPut(task.ID, task.Action, ok, result, errStr)
+	a.restReport(ctx, task.ID, task.Nonce, ok, result, errStr)
+}
 
+func (a *Agent) restReport(ctx context.Context, taskID, nonce string, ok bool, result map[string]interface{}, errStr string) {
 	var resultJSON json.RawMessage
 	if result != nil {
 		resultJSON, _ = json.Marshal(result)
 	}
 	report := map[string]interface{}{
+		"nonce":  nonce,
 		"ok":     ok,
-		"result": json.RawMessage{},
+		"result": json.RawMessage("{}"),
 		"error":  errStr,
 	}
 	if resultJSON != nil {
@@ -320,7 +548,7 @@ func (a *Agent) pollRest(ctx context.Context) {
 	reportData, _ := json.Marshal(report)
 
 	req2, _ := http.NewRequestWithContext(ctx, "POST",
-		fmt.Sprintf("%s/agent/tasks/%s/result", a.cfg.Server, task.ID),
+		fmt.Sprintf("%s/agent/tasks/%s/result", a.cfg.Server, taskID),
 		bytes.NewReader(reportData))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.Header.Set("Authorization", "Bearer "+a.agentTok)
@@ -336,10 +564,11 @@ func (a *Agent) pollRest(ctx context.Context) {
 func (a *Agent) restHeartbeat() {
 	host, _ := os.Hostname()
 	body := map[string]interface{}{
-		"status":  "online",
-		"host":    host,
-		"tools":   detectTools(),
-		"version": a.cfg.Version,
+		"status":           "online",
+		"host":             host,
+		"tools":            detectTools(),
+		"version":          a.cfg.Version,
+		"protocol_version": ProtocolVersion,
 	}
 	data, _ := json.Marshal(body)
 	req, _ := http.NewRequestWithContext(context.Background(), "POST", a.cfg.Server+"/agent/heartbeat", bytes.NewReader(data))
@@ -359,19 +588,64 @@ func (a *Agent) sendHeartbeat(conn *websocket.Conn) {
 		"type": "heartbeat",
 		"id":   fmt.Sprintf("hb-%d", time.Now().UnixNano()),
 		"payload": map[string]interface{}{
-			"status":  "online",
-			"host":    host,
-			"tools":   detectTools(),
-			"version": a.cfg.Version,
+			"status":           "online",
+			"host":             host,
+			"tools":            detectTools(),
+			"version":          a.cfg.Version,
+			"protocol_version": ProtocolVersion,
 		},
 	}
 	b, _ := json.Marshal(msg)
 	a.wsWriteText(conn, b)
 }
 
-func (a *Agent) handleCmdWS(conn *websocket.Conn, cmd *wsCmd) {
+// handleCmdWSWithLease wraps handleCmdWS with:
+//   - journal fast-path so a re-delivered task returns the cached result
+//     instead of re-executing side effects,
+//   - a 45s lease-renew ticker over WS so the console reaper doesn't reclaim
+//     the task while a long-running action (e.g. tool upgrade) is in flight.
+func (a *Agent) handleCmdWSWithLease(ctx context.Context, conn *websocket.Conn, cmd *wsCmd) {
+	// bug 25: Expires（ms epoch）是 WS cmd 协议字段，落地校验——队列延迟或重放
+	// 导致过期命令不应被执行。cmd.Expires==0 视为无 deadline。
+	if cmd.Expires > 0 && time.Now().UnixMilli() > cmd.Expires {
+		a.sendResult(conn, cmd, false, nil, "command expired")
+		return
+	}
+	if cached, ok := a.journalGet(cmd.ID); ok {
+		a.sendResult(conn, cmd, cached.Ok, cached.Result, cached.Error)
+		return
+	}
+
+	// ponytail (BUG-05): renew the lease every 45s while the action runs.
+	// 2 minute server-side extension per call; task journal captures the
+	// final result before Exit for the upgrade path.
+	leaseCtx, cancelLease := context.WithCancel(ctx)
+	defer cancelLease()
+	go func() {
+		ticker := time.NewTicker(45 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case <-ticker.C:
+				msg, _ := json.Marshal(map[string]interface{}{
+					"type":  "cmd_lease",
+					"id":    cmd.ID,
+					"nonce": cmd.Nonce,
+				})
+				if err := a.wsWriteText(conn, msg); err != nil {
+					return
+				}
+			}
+		}
+	}()
+
 	result, errStr := a.handleCmd(cmd.Action, cmd.Payload)
 	ok := errStr == ""
+	// ponytail (BUG-05): persist to journal BEFORE reporting. If the network
+	// drops between here and the ack, the redelivery path finds the entry.
+	a.journalPut(cmd.ID, cmd.Action, ok, result, errStr)
 	a.sendResult(conn, cmd, ok, result, errStr)
 }
 
@@ -383,6 +657,7 @@ func (a *Agent) sendResult(conn *websocket.Conn, cmd *wsCmd, ok bool, result map
 	msg := map[string]interface{}{
 		"type":   "cmd_result",
 		"id":     cmd.ID,
+		"nonce":  cmd.Nonce,
 		"status": status,
 		"payload": map[string]interface{}{
 			"result": result,
@@ -397,9 +672,16 @@ func (a *Agent) sendResult(conn *websocket.Conn, cmd *wsCmd, ok bool, result map
 // concurrent writer. ponytail: handleCmdWS runs per-command goroutines that
 // race with sendHeartbeat — unsynchronized writes corrupt frames and can
 // drop the connection (one more cause of "quickly offline").
+// wsWriteText serializes WS writes; gorilla/websocket allows only one
+// concurrent writer. ponytail: handleCmdWS runs per-command goroutines that
+// race with sendHeartbeat — unsynchronized writes corrupt frames and can
+// drop the connection (one more cause of "quickly offline").
+// 写超时确保对端停读 WS 帧时 WriteMessage 不会永久阻塞并持 a.mu，否则
+// wsWritePing/sendHeartbeat 也被卡死，绕过 90s 读超时恢复路径（bug 15）。
 func (a *Agent) wsWriteText(conn *websocket.Conn, b []byte) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	return conn.WriteMessage(websocket.TextMessage, b)
 }
 
@@ -435,6 +717,18 @@ func (a *Agent) handleCmd(action string, payload []byte) (map[string]interface{}
 
 // --- credential handling ---
 
+// validTools mirrors the toolConfigPath switch: only these tools may name a
+// credential or config file. Anything else is rejected to prevent
+// filepath.Join(credsDir, tool+".sh") from escaping credsDir (bug 13).
+var validTools = map[string]bool{"codex": true, "claude": true, "gemini": true, "opencode": true}
+
+func validTool(tool string) bool { return validTools[tool] }
+
+// envKeyRe matches a POSIX/shell-safe environment variable name. Credential
+// keys are interpolated raw into `export KEY='...'`, so an unchecked key like
+// "foo; rm -rf ~; bar" would be executed when the creds file is sourced (bug 14).
+var envKeyRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+
 func (a *Agent) credFile(tool string) string {
 	return filepath.Join(a.credsDir, tool+".sh")
 }
@@ -451,6 +745,10 @@ func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("bad payload: %v", err)
 	}
+	// bug 13: 白名单校验 tool，防止 credFile 拼接出 credsDir 之外的路径。
+	if !validTool(p.Tool) {
+		return nil, "unsupported tool"
+	}
 
 	if p.Tool == "codex" {
 		key := p.Credentials["OPENAI_API_KEY"]
@@ -459,8 +757,12 @@ func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 		}
 		authJSON, _ := json.Marshal(map[string]string{"OPENAI_API_KEY": key})
 		path := a.codexAuthFile()
-		os.MkdirAll(filepath.Dir(path), 0755)
-		if err := os.WriteFile(path, authJSON, 0600); err != nil {
+		// BUG-01: codex config dir 0700; atomic write of auth.json 0600.
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return nil, fmt.Sprintf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		_ = os.Chmod(filepath.Dir(path), 0700)
+		if err := writeFileAtomic(path, authJSON, 0600); err != nil {
 			return nil, fmt.Sprintf("write %s: %v", path, err)
 		}
 		return map[string]interface{}{"path": path, "format": "auth.json", "keys": []string{"OPENAI_API_KEY"}}, ""
@@ -468,12 +770,18 @@ func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 
 	var lines []string
 	for k, v := range p.Credentials {
+		// bug 14: key 原样插值进 `export KEY='...'`，不校验会被 .bashrc source 时 RCE。
+		if !envKeyRe.MatchString(k) {
+			return nil, "invalid credential key: " + k
+		}
 		lines = append(lines, fmt.Sprintf("export %s='%s'", k, shellEscape(v)))
 	}
 	content := strings.Join(lines, "\n") + "\n"
 
 	path := a.credFile(p.Tool)
-	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+	// BUG-01: atomic + 0600. writeFileAtomic also runs an explicit chmod after
+	// rename so an inherited 0644 file (from an older agent) is tightened.
+	if err := writeFileAtomic(path, []byte(content), 0600); err != nil {
 		return nil, fmt.Sprintf("write %s: %v", path, err)
 	}
 
@@ -485,6 +793,10 @@ func (a *Agent) handleRemoveCred(payload []byte) (map[string]interface{}, string
 	var p removeCredPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("bad payload: %v", err)
+	}
+	// bug 13: 白名单校验 tool。
+	if !validTool(p.Tool) {
+		return nil, "unsupported tool"
 	}
 
 	result := map[string]interface{}{}
@@ -515,12 +827,11 @@ func (a *Agent) handleRemoveCred(payload []byte) (map[string]interface{}, string
 		}
 	}
 
-	for _, k := range p.EnvKeysToRemove {
-		os.Unsetenv(k)
-	}
-
+	// bug 26: 不再 os.Unsetenv(p.EnvKeysToRemove)。凭据在 creds/*.sh，由用户交互
+	// shell source，daemon 从不持有这些 env——Unsetenv 是空操作，却报 env_keys_cleared
+	// 误导。真正的清理是上面的文件删除。
 	result["removed"] = removed
-	result["env_keys_cleared"] = p.EnvKeysToRemove
+	result["cred_files_removed"] = len(removed)
 	return result, ""
 }
 
@@ -567,25 +878,107 @@ func (a *Agent) handleWriteConfig(payload []byte) (map[string]interface{}, strin
 	if path == "" {
 		return nil, "unsupported tool"
 	}
-	os.MkdirAll(filepath.Dir(path), 0755)
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, fmt.Sprintf("mkdir %s: %v", dir, err)
+	}
+	_ = os.Chmod(dir, 0700)
 
 	backupPath := backupFilePath(path)
 	if existing, err := os.ReadFile(path); err == nil {
-		os.WriteFile(backupPath, existing, 0644)
+		// bug 16: 备份写失败必须中止，否则线上写成功但原始配置无备份可恢复。
+		// BUG-01: backup 0600 — was 0644, letting peer users read secrets.
+		if berr := writeFileAtomic(backupPath, existing, 0600); berr != nil {
+			return nil, fmt.Sprintf("backup %s: %v", backupPath, berr)
+		}
 	}
-	if err := os.WriteFile(path, []byte(p.Content), 0644); err != nil {
+	if err := writeFileAtomic(path, []byte(p.Content), 0600); err != nil {
 		return nil, fmt.Sprintf("write %s: %v", path, err)
 	}
-	return map[string]interface{}{"path": path, "format": p.Format, "content": p.Content, "backup": filepath.Base(backupPath)}, ""
+	// ponytail (BUG-01): result no longer echoes p.Content. content_sha256
+	// is a stable fingerprint that lets the console verify rollout without
+	// storing plaintext in agent_tasks.result_json. Server-side scrubs the
+	// content field even if a legacy agent returns it.
+	sum := sha256.Sum256([]byte(p.Content))
+	return map[string]interface{}{
+		"path":           path,
+		"format":         p.Format,
+		"content_sha256": hex.EncodeToString(sum[:]),
+		"backup":         filepath.Base(backupPath),
+	}, ""
+}
+
+// writeFileAtomic writes data to path via a same-directory temp file with the
+// requested mode, fsyncs, renames on top of any existing file, and fsyncs the
+// parent directory so the metadata survives crash. Also explicitly chmods
+// after rename because os.OpenFile mode is masked by umask.
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("open tmp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	// If anything below fails, remove the leftover temp file so the config
+	// dir doesn't accumulate half-written garbage that later scans might
+	// misinterpret as a backup.
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		tmp.Close()
+		return fmt.Errorf("chmod tmp: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write tmp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync tmp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close tmp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	cleanup = false
+	// Explicit chmod in case rename target existed with wider mode; and to
+	// defeat umask.
+	_ = os.Chmod(path, mode)
+	// Best-effort parent fsync so the rename hits disk. Ignore errors on
+	// platforms that don't support directory fsync (e.g. Windows).
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // --- backups ---
 
+// backupFilePath 命名 path 的备份。时间戳为毫秒精度，并在同名文件已存在时
+// 追加数字后缀，避免同 tool 同秒/同毫秒两次 write_config 互相覆盖备份、静默丢失
+// 原始配置（bug 24）。
 func backupFilePath(path string) string {
 	dir := filepath.Dir(path)
 	base := filepath.Base(path)
-	ts := time.Now().Format("20060102_150405")
-	return filepath.Join(dir, fmt.Sprintf(".%s.bak.%s", base, ts))
+	ts := time.Now().Format("20060102_150405.000")
+	candidate := filepath.Join(dir, fmt.Sprintf(".%s.bak.%s", base, ts))
+	if _, err := os.Stat(candidate); err != nil {
+		return candidate
+	}
+	for i := 2; ; i++ {
+		next := filepath.Join(dir, fmt.Sprintf(".%s.bak.%s.%d", base, ts, i))
+		if _, err := os.Stat(next); err != nil {
+			return next
+		}
+	}
 }
 
 func (a *Agent) handleListBackups(payload []byte) (map[string]interface{}, string) {
@@ -623,7 +1016,7 @@ func (a *Agent) handleRestoreBackup(payload []byte) (map[string]interface{}, str
 		return nil, "unsupported tool"
 	}
 	dir := filepath.Dir(path)
-	backupPath := filepath.Join(dir, p.Backup)
+	var backupPath string
 	if p.Backup == "" {
 		entries, _ := os.ReadDir(dir)
 		var latest string
@@ -643,6 +1036,15 @@ func (a *Agent) handleRestoreBackup(payload []byte) (map[string]interface{}, str
 			return nil, "no backups found"
 		}
 		backupPath = filepath.Join(dir, latest)
+	} else {
+		// p.Backup must be a bare filename inside the config dir. Reject anything
+		// containing a path separator or a traversal segment so it cannot escape dir
+		// (e.g. "../../etc/passwd"), which would read arbitrary files and clobber the
+		// live config.
+		if filepath.Base(p.Backup) != p.Backup || p.Backup == "." || p.Backup == ".." {
+			return nil, "invalid backup name"
+		}
+		backupPath = filepath.Join(dir, p.Backup)
 	}
 	data, err := os.ReadFile(backupPath)
 	if err != nil {
@@ -650,9 +1052,13 @@ func (a *Agent) handleRestoreBackup(payload []byte) (map[string]interface{}, str
 	}
 	currentBackup := backupFilePath(path)
 	if existing, err := os.ReadFile(path); err == nil {
-		os.WriteFile(currentBackup, existing, 0644)
+		// bug 16: 同 handleWriteConfig——备份写失败要中止。
+		// BUG-01: backup 0600 — was 0644.
+		if berr := writeFileAtomic(currentBackup, existing, 0600); berr != nil {
+			return nil, fmt.Sprintf("backup current %s: %v", currentBackup, berr)
+		}
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := writeFileAtomic(path, data, 0600); err != nil {
 		return nil, fmt.Sprintf("restore %s: %v", path, err)
 	}
 	return map[string]interface{}{"path": path, "restored_from": filepath.Base(backupPath), "backup_of_current": filepath.Base(currentBackup)}, ""
@@ -660,19 +1066,102 @@ func (a *Agent) handleRestoreBackup(payload []byte) (map[string]interface{}, str
 
 // --- upgrade ---
 
-func (a *Agent) handleUpgradeAgent(payload []byte) (map[string]interface{}, string) {
-	exe, _ := os.Executable()
+// manifestEntry mirrors the JSON produced by build-dist.sh / served by the
+// Console at /agent/manifest.json.
+type manifestEntry struct {
+	SHA256 string `json:"sha256"`
+	Size   int64  `json:"size"`
+}
+type manifestFile struct {
+	Version  string                   `json:"version"`
+	Binaries map[string]manifestEntry `json:"binaries"`
+}
+
+// ponytail (BUG-07): allowInsecure controls whether http:// upgrades are
+// permitted. Default is false; users must pass --allow-insecure at install
+// time to opt in (typically localhost/lab). Production Consoles must serve
+// HTTPS. Also enforced in CheckRedirect below so a redirect can't downgrade.
+var allowInsecure = false
+
+func (a *Agent) handleUpgradeAgent(_ []byte) (map[string]interface{}, string) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Sprintf("resolve exe: %v", err)
+	}
 	oldVersion := a.cfg.Version
 
-	url := fmt.Sprintf("%s/agent/binary/%s/%s", a.cfg.Server, runtime.GOOS, runtime.GOARCH)
-	resp, err := http.Get(url)
+	consoleURL, err := url.Parse(a.cfg.Server)
+	if err != nil {
+		return nil, fmt.Sprintf("bad console URL: %v", err)
+	}
+	if consoleURL.Scheme != "https" && !allowInsecure {
+		return nil, "console URL must be HTTPS for agent self-upgrade (set --allow-insecure to override)"
+	}
+
+	// ponytail (BUG-07): dedicated http.Client with:
+	//   - overall Timeout (defence against a stuck download exhausting the
+	//     upgrade slot forever),
+	//   - CheckRedirect that refuses cross-host redirects AND HTTPS→HTTP
+	//     downgrade even for localhost dev,
+	//   - no shared transport (default client is package-global and could
+	//     inherit whatever the app configured elsewhere).
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) == 0 {
+				return nil
+			}
+			orig := via[0].URL
+			if req.URL.Host != orig.Host {
+				return fmt.Errorf("cross-host redirect denied: %s -> %s", orig.Host, req.URL.Host)
+			}
+			if orig.Scheme == "https" && req.URL.Scheme != "https" {
+				return fmt.Errorf("https downgrade redirect denied")
+			}
+			return nil
+		},
+	}
+
+	// 1) Fetch manifest and pick our platform's expected size + sha256.
+	manifestURL := strings.TrimRight(a.cfg.Server, "/") + "/agent/manifest.json"
+	mreq, err := http.NewRequest("GET", manifestURL, nil)
+	if err != nil {
+		return nil, fmt.Sprintf("build manifest req: %v", err)
+	}
+	mresp, err := client.Do(mreq)
+	if err != nil {
+		return nil, fmt.Sprintf("fetch manifest: %v", err)
+	}
+	mdata, _ := io.ReadAll(io.LimitReader(mresp.Body, 1<<20))
+	mresp.Body.Close()
+	if mresp.StatusCode != 200 {
+		return nil, fmt.Sprintf("manifest %d: %s", mresp.StatusCode, string(mdata))
+	}
+	var manifest manifestFile
+	if err := json.Unmarshal(mdata, &manifest); err != nil {
+		return nil, fmt.Sprintf("parse manifest: %v", err)
+	}
+	platform := runtime.GOOS + "-" + runtime.GOARCH
+	entry, ok := manifest.Binaries[platform]
+	if !ok || entry.Size <= 0 || entry.SHA256 == "" {
+		return nil, fmt.Sprintf("manifest has no entry for %s", platform)
+	}
+
+	// 2) Download binary. Cap length at expected size + 1KB slack; anything
+	// larger implies a tampered response and we bail before writing.
+	binURL := fmt.Sprintf("%s/agent/binary/%s/%s", strings.TrimRight(a.cfg.Server, "/"), runtime.GOOS, runtime.GOARCH)
+	breq, err := http.NewRequest("GET", binURL, nil)
+	if err != nil {
+		return nil, fmt.Sprintf("build binary req: %v", err)
+	}
+	bresp, err := client.Do(breq)
 	if err != nil {
 		return nil, fmt.Sprintf("download: %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Sprintf("download failed %d: %s", resp.StatusCode, string(b))
+	defer bresp.Body.Close()
+	if bresp.StatusCode != 200 {
+		b, _ := io.ReadAll(io.LimitReader(bresp.Body, 1024))
+		return nil, fmt.Sprintf("download failed %d: %s", bresp.StatusCode, string(b))
 	}
 
 	tmpPath := exe + ".new"
@@ -680,25 +1169,44 @@ func (a *Agent) handleUpgradeAgent(payload []byte) (map[string]interface{}, stri
 	if err != nil {
 		return nil, fmt.Sprintf("create tmp: %v", err)
 	}
-	n, err := io.Copy(f, resp.Body)
+	hasher := sha256.New()
+	written, err := io.Copy(io.MultiWriter(f, hasher), io.LimitReader(bresp.Body, entry.Size+1024))
 	f.Close()
 	if err != nil {
 		os.Remove(tmpPath)
 		return nil, fmt.Sprintf("write tmp: %v", err)
 	}
-	if n < 1024 {
+
+	// 3) Verify size THEN sha256. Size mismatch is nearly always a truncated
+	// or padded response — refusing early keeps the hash-mismatch error
+	// message meaningful for the harder-to-diagnose tamper case.
+	if written != entry.Size {
 		os.Remove(tmpPath)
-		return nil, fmt.Sprintf("downloaded binary too small (%d bytes)", n)
+		return nil, fmt.Sprintf("binary size mismatch: got %d, want %d", written, entry.Size)
+	}
+	gotHash := hex.EncodeToString(hasher.Sum(nil))
+	if gotHash != entry.SHA256 {
+		os.Remove(tmpPath)
+		return nil, fmt.Sprintf("binary sha256 mismatch: got %s, want %s", gotHash, entry.SHA256)
 	}
 
+	// 4) Confirm the binary reports the expected version. Belt-and-braces:
+	//    if a tampered binary somehow shared the same hash (only possible
+	//    if the manifest itself was also swapped), --version disagreement
+	//    still stops the install.
 	test := exec.Command(tmpPath, "--version")
-	test.Stdout = io.Discard
-	test.Stderr = io.Discard
-	if err := test.Run(); err != nil {
+	verOut, verErr := test.CombinedOutput()
+	if verErr != nil {
 		os.Remove(tmpPath)
-		return nil, fmt.Sprintf("new binary is not executable: %v", err)
+		return nil, fmt.Sprintf("new binary is not executable: %v", verErr)
+	}
+	gotVer := strings.TrimSpace(string(verOut))
+	if gotVer != manifest.Version {
+		os.Remove(tmpPath)
+		return nil, fmt.Sprintf("new binary --version reported %q, expected %q", gotVer, manifest.Version)
 	}
 
+	// 5) Atomic swap. .bak retained so a bad rollout can be undone by hand.
 	backupPath := exe + ".bak"
 	os.Remove(backupPath)
 	if err := os.Rename(exe, backupPath); err != nil {
@@ -714,11 +1222,12 @@ func (a *Agent) handleUpgradeAgent(payload []byte) (map[string]interface{}, stri
 	go func() { time.Sleep(200 * time.Millisecond); os.Exit(0) }()
 
 	return map[string]interface{}{
-		"old_version": oldVersion,
-		"new_version": a.cfg.Version,
-		"path":        exe,
-		"backup":      backupPath,
-		"restart":     "agent will restart with new binary",
+		"old_version":    oldVersion,
+		"new_version":    manifest.Version,
+		"path":           exe,
+		"backup":         backupPath,
+		"restart":        "agent will restart with new binary",
+		"content_sha256": gotHash,
 	}, ""
 }
 
@@ -729,7 +1238,9 @@ func (a *Agent) handleUpgradeTool(payload []byte) (map[string]interface{}, strin
 	}
 	json.Unmarshal(payload, &p)
 	out, _ := exec.Command(p.Tool, "--version").CombinedOutput()
-	return map[string]interface{}{"tool": p.Tool, "old_version": firstLine(string(out)), "new_version": p.Version}, ""
+	// bug 17: 诚实优于假成功——本 agent 从不真正下载/安装工具，所以返回失败，
+	// 而非把请求的 Version 当 new_version 回报（控制台会误记为「已升级到 X」）。
+	return map[string]interface{}{"tool": p.Tool, "old_version": firstLine(string(out))}, "upgrade_tool not implemented"
 }
 
 // --- helpers ---
