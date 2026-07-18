@@ -28,7 +28,10 @@ export function registerHooks(app: FastifyInstance) {
 
     const roleOrder = ["viewer", "operator", "admin"] as const
     const adminOnly = [
-      "/api/providers/import/", "/api/agent/enroll-tokens",
+      // ponytail: /api/import-jobs/ mutations must match /api/providers/import/'s
+      // admin-only guard — importing is admin-only, rolling back an import (which
+      // destructively DELETEs rows) can never be lower privilege (BUG-02).
+      "/api/providers/import/", "/api/import-jobs/", "/api/agent/enroll-tokens",
     ]
     const operatorPlus = [
       "/api/providers", "/api/servers/", "/api/batch/",
