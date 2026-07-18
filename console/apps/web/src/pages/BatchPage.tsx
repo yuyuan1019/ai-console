@@ -74,7 +74,19 @@ export function BatchPage() {
   function doRollback() {
     if (!batchId) return
     if (!confirm("回滚所有成功写入的机器到写入前配置？")) return
-    rollbackMut.mutate(batchId, { onSuccess: () => alert("回滚任务已创建，agent 将在下次心跳时执行。") })
+    rollbackMut.mutate(batchId, {
+      onSuccess: () => alert("回滚任务已创建，agent 将在下次心跳时执行。"),
+      onError: (err: any) => {
+        // ponytail (BUG-04): server returns explicit codes for the two race
+        // states — batch_not_finished (running) and already_rolled_back — so
+        // users get a clear signal instead of a generic "Request failed".
+        const msg = String(err?.message || "")
+        if (msg.includes("batch_not_finished")) alert("批次还在执行中，请等待完成后再回滚。")
+        else if (msg.includes("already_rolled_back")) alert("该批次已回滚过。")
+        else if (msg.includes("rollback_in_progress")) alert("回滚已在进行中。")
+        else alert("回滚失败：" + msg)
+      },
+    })
   }
 
   const canPreview = (tool === "opencode" && selectedKeys.length > 0) || (!!providerId && !!keyId && !!modelId)
@@ -98,7 +110,12 @@ export function BatchPage() {
 
   const availableProviderKeys = providerDetail?.keys.filter((k) => k.enabled === 1 && !selectedKeys.some((sk) => sk.key_id === k.id)) || []
   const multiKey = tool === "opencode" && selectedKeys.length > 0
-  const allDone = batchStatus?.progress?.every((p) => p.state === "done" || p.state === "failed")
+  // ponytail (BUG-04): only enable rollback when the write pass is genuinely
+  // terminal (done/partial). rolling_back/rolled_back/partial_rollback all
+  // mean rollback is already unavailable; the server would 409/202 anyway,
+  // but the UI should not offer the button in the first place.
+  const canRollback = batchStatus?.status === "done" || batchStatus?.status === "partial"
+  const allDone = batchStatus?.progress?.length ? batchStatus.progress.every((p) => p.state === "done" || p.state === "failed" || p.state === "skipped") : false
 
   return (
     <div className="space-y-6">
@@ -307,7 +324,7 @@ export function BatchPage() {
                     </Badge>
                   )}
                 </div>
-                {allDone && (
+                {allDone && canRollback && (
                   <Button size="sm" variant="outline" onClick={doRollback} disabled={rollbackMut.isPending}>
                     {rollbackMut.isPending ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="mr-1 h-3.5 w-3.5" />}
                     全部回滚
