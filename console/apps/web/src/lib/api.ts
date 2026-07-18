@@ -8,7 +8,70 @@ export function setAccessToken(token: string | null) {
   else localStorage.removeItem("ai_console_access_token")
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export function getAccessToken() {
+  return accessToken
+}
+
+// ponytail (BUG-03): structured error so callers can distinguish 409
+// "refresh_already_rotated" (concurrent refresh race — retryable) from real
+// 401. Message keeps the old "<status> <body>" shape so pre-refactor toast
+// UIs still show something sensible.
+export class ApiError extends Error {
+  readonly status: number
+  readonly code: string | null
+  constructor(status: number, code: string | null, message: string) {
+    super(message)
+    this.name = "ApiError"
+    this.status = status
+    this.code = code
+  }
+}
+
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms))
+
+// Single-flight token refresh. Concurrent 401s share one refresh call, and the
+// refresh request itself bypasses the 401 interceptor (see request()) to avoid
+// recursion. Without this, the SPA breaks once the 15-min access JWT expires,
+// because nothing ever called api.refresh.
+let refreshPromise: Promise<string | null> | null = null
+
+export function refreshAccessToken(): Promise<string | null> {
+  if (refreshPromise) return refreshPromise
+  refreshPromise = (async () => {
+    try {
+      // ponytail (BUG-03): a 409 refresh_already_rotated means a concurrent
+      // request won the race; the winning Set-Cookie has landed in the
+      // browser jar. Retry a small number of times so our second POST uses
+      // the fresh cookie and returns the winner's access token — the losing
+      // tab never had to log out. On 401 or any other error we fall through
+      // and drop the access token as before.
+      const backoffMs = [50, 150, 300]
+      for (let attempt = 0; attempt <= backoffMs.length; attempt++) {
+        try {
+          const res = await rawRequest<AuthResponse>("/auth/refresh", { method: "POST", body: JSON.stringify({}) })
+          setAccessToken(res.accessToken)
+          return res.accessToken
+        } catch (e) {
+          if (e instanceof ApiError && e.status === 409 && e.code === "refresh_already_rotated" && attempt < backoffMs.length) {
+            await sleep(backoffMs[attempt])
+            continue
+          }
+          throw e
+        }
+      }
+      setAccessToken(null)
+      return null
+    } catch {
+      setAccessToken(null)
+      return null
+    } finally {
+      refreshPromise = null
+    }
+  })()
+  return refreshPromise
+}
+
+async function rawRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const method = (init?.method || "GET").toUpperCase()
   const hasBody = method !== "GET" && method !== "HEAD" && method !== "DELETE"
   const res = await fetch(`${BASE}${path}`, {
@@ -22,9 +85,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const text = await res.text().catch(() => res.statusText)
-    throw new Error(`${res.status} ${text}`)
+    let code: string | null = null
+    try {
+      const parsed = JSON.parse(text)
+      if (parsed && typeof parsed.error === "string") code = parsed.error
+    } catch {}
+    throw new ApiError(res.status, code, `${res.status} ${text}`)
   }
   return res.json() as Promise<T>
+}
+
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  try {
+    return await rawRequest<T>(path, init)
+  } catch (e) {
+    const is401 = e instanceof ApiError && e.status === 401
+    // The refresh/login/logout endpoints own their own auth-failure handling; never recurse.
+    if (!is401 || path === "/auth/refresh" || path === "/auth/login" || path === "/auth/logout") throw e
+    const fresh = await refreshAccessToken()
+    if (!fresh) throw e
+    return rawRequest<T>(path, init) // retry once with the rotated token
+  }
 }
 
 export interface AuthUser {
@@ -137,6 +218,8 @@ export interface AgentTask {
 export interface EnrollTokenResult {
   token: string
   expires_at: number
+  mode?: "new" | "replace"
+  target_server_id?: string | null
 }
 
 export interface AgentManifest {
@@ -293,7 +376,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  createEnrollToken: (input: { name?: string; tags?: string[]; expires_minutes?: number }) =>
+  createEnrollToken: (input: { name?: string; tags?: string[]; expires_minutes?: number; mode?: "new" | "replace"; target_server_id?: string }) =>
     request<EnrollTokenResult>("/agent/enroll-tokens", {
       method: "POST",
       body: JSON.stringify(input),
@@ -385,4 +468,5 @@ export const api = {
     request<AgentTask>(`/servers/${id}/tools/upgrade`, { method: "POST", body: JSON.stringify(input) }),
   changePassword: (oldPassword: string, newPassword: string) =>
     request<{ ok: boolean }>("/auth/change-password", { method: "POST", body: JSON.stringify({ old_password: oldPassword, new_password: newPassword }) }),
+  wsTicket: () => request<{ ticket: string; expires_in: number }>("/auth/ws-ticket", { method: "POST", body: JSON.stringify({}) }),
 }
