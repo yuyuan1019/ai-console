@@ -24,18 +24,26 @@ CREATE TABLE IF NOT EXISTS sessions (
   user_agent TEXT, ip TEXT,
   last_active_at INTEGER NOT NULL,
   created_at INTEGER NOT NULL,
-  revoked_at INTEGER
+  revoked_at INTEGER,
+  rotated_at INTEGER            -- 最近一次 refresh-token 轮换时间（bug 9 并发容忍）
 );
 
 -- ===== 服务器与配置 =====
 CREATE TABLE IF NOT EXISTS server_groups (id TEXT PRIMARY KEY, name TEXT NOT NULL, parent_id TEXT);
+-- ponytail (migration 019): agent_instance_id NOT NULL + UNIQUE, and
+-- agent_protocol_version NOT NULL CHECK=2 (no default). 2.0 hard cutover:
+-- enroll must explicitly write both, schema refuses protocol 1.
 CREATE TABLE IF NOT EXISTS servers (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, os TEXT, arch TEXT, host TEXT,
   agent_token_hash TEXT, status TEXT NOT NULL DEFAULT 'offline',
   last_seen INTEGER, tags TEXT NOT NULL DEFAULT '[]', group_id TEXT,
   agent_version TEXT,
+  agent_instance_id TEXT NOT NULL UNIQUE,
+  agent_protocol_version INTEGER NOT NULL CHECK (agent_protocol_version = 2),
   created_at INTEGER NOT NULL
 );
+-- ponytail (migration 018): target_server_id + enroll_mode allow admin-issued
+-- "replace this specific server" tokens without loosening normal enroll.
 CREATE TABLE IF NOT EXISTS agent_enroll_tokens (
   id TEXT PRIMARY KEY,
   token_hash TEXT NOT NULL,
@@ -44,7 +52,9 @@ CREATE TABLE IF NOT EXISTS agent_enroll_tokens (
   expires_at INTEGER NOT NULL,
   used_at INTEGER,
   created_by TEXT,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  target_server_id TEXT,
+  enroll_mode TEXT NOT NULL DEFAULT 'new'
 );
 CREATE TABLE IF NOT EXISTS tools (
   server_id TEXT NOT NULL, name TEXT NOT NULL,
@@ -66,12 +76,17 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
   request_id TEXT,                            -- 关联控制台请求 ID（审计链路）
   nonce TEXT,                                 -- 命令下发一次性随机数（防重放）
   expires_at INTEGER,                         -- 命令过期时间戳（超时自动失效）
-  attempt_count INTEGER NOT NULL DEFAULT 0    -- 重试次数
+  attempt_count INTEGER NOT NULL DEFAULT 0,   -- 重试次数
+  encrypted_payload TEXT,                     -- migration 016: AES-256-GCM for sensitive rows
+  encrypted_payload_iv TEXT
 );
 CREATE TABLE IF NOT EXISTS configs (
   server_id TEXT NOT NULL, tool TEXT NOT NULL, format TEXT NOT NULL,
   content TEXT NOT NULL, version INTEGER NOT NULL, source TEXT NOT NULL,  -- manual|binding|batch
   updated_by TEXT, updated_at INTEGER NOT NULL,
+  encrypted_content TEXT,                     -- migration 016: AES-256-GCM ciphertext of secret configs
+  encrypted_content_iv TEXT,
+  content_sha256 TEXT,                        -- fingerprint of decrypted content
   PRIMARY KEY (server_id, tool, version)
 );
 
@@ -117,7 +132,9 @@ CREATE TABLE IF NOT EXISTS import_jobs (
 CREATE TABLE IF NOT EXISTS batch_jobs (
   id TEXT PRIMARY KEY, tool TEXT NOT NULL, source_type TEXT, source_ref TEXT,
   targets_json TEXT, status TEXT NOT NULL, progress_json TEXT,
-  started_by TEXT, started_at INTEGER NOT NULL, finished_at INTEGER
+  started_by TEXT, started_at INTEGER NOT NULL, finished_at INTEGER,
+  rollback_progress_json TEXT,                 -- migration 017
+  rollback_started_at INTEGER
 );
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,3 +153,6 @@ CREATE TABLE IF NOT EXISTS model_pricing (
 
 CREATE INDEX IF NOT EXISTS idx_provider_keys_provider ON provider_keys(provider_id);
 CREATE INDEX IF NOT EXISTS idx_models_provider ON models(provider_id);
+-- UNIQUE constraint on agent_instance_id is embedded in the CREATE TABLE
+-- statement (migration 019). A partial UNIQUE index from migration 018 also
+-- exists during upgrade but is dropped by 019's rebuild.
