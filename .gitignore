@@ -7,5 +7,12 @@ data/
 seed/
 windows-agent-enroll.ps1
 *.txt
+# ponytail (BUG-06): keep agent/cmd/ai-agent/ source tree tracked; only
+# ignore the actual compiled binaries left behind by local `go build`.
+# The old bare `ai-agent` pattern matched the cmd/ai-agent/ directory itself
+# and silently excluded main.go from `git add`.
 ai-agent.exe
-ai-agent
+/ai-agent
+/ai-agent.exe
+/agent/cmd/ai-agent/ai-agent
+/agent/cmd/ai-agent/ai-agent.exe
