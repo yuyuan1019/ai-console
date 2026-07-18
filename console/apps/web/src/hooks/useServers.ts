@@ -56,7 +56,7 @@ export function useAgentManifest() {
 
 export function useCreateEnrollToken() {
   return useMutation({
-    mutationFn: (input: { name?: string; tags?: string[]; expires_minutes?: number }) => api.createEnrollToken(input),
+    mutationFn: (input: { name?: string; tags?: string[]; expires_minutes?: number; mode?: "new" | "replace"; target_server_id?: string }) => api.createEnrollToken(input),
   })
 }
 

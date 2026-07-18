@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { useAgentManifest, useDeleteServer, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useUpdateServer } from "@/hooks/useServers"
+import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useUpdateServer } from "@/hooks/useServers"
 import { useProviders, useProvider } from "@/hooks/useProviders"
 
 function formatTs(value: number | null) {
@@ -79,6 +79,12 @@ export function ServerDetailPage() {
   const setCredential = useSetCredential(id)
   const removeCredential = useRemoveCredential(id)
   const upgradeAgent = useUpgradeAgent(id)
+  // ponytail (BUG-08): "重装/恢复此机器" mints a one-shot replace-mode enroll
+  // token bound to this server's id. The new agent install generates a fresh
+  // agent_instance_id; server-side enroll validates target_server_id matches
+  // and closes the pre-replace WS so it can't keep receiving tasks.
+  const createEnrollToken = useCreateEnrollToken()
+  const [replaceTokenShown, setReplaceTokenShown] = useState<string | null>(null)
   const [tool, setTool] = useState("codex")
   const [content, setContent] = useState("")
   const [credProviderId, setCredProviderId] = useState("")
@@ -263,21 +269,54 @@ export function ServerDetailPage() {
             {server.os || "unknown"} · {server.host || "—"}
           </p>
         </div>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="ml-auto shrink-0 text-destructive"
-          disabled={deleteServer.isPending}
-          onClick={() => {
-            if (!id) return
-            if (confirm(`删除服务器「${server.name}」？这只会删除控制台记录，不会停止目标机器上的 agent。`)) {
-              deleteServer.mutate(id, { onSuccess: () => navigate("/servers") })
-            }
-          }}
-        >
-          <Trash2 className="mr-1 h-4 w-4" /> 删除
-        </Button>
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {/* ponytail (BUG-08): mint a replace-mode enroll token for reinstall/recovery */}
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={createEnrollToken.isPending || !id}
+            onClick={() => {
+              if (!id) return
+              if (!confirm(`为「${server.name}」生成一次性重装 token？目标机器需要先卸载旧 agent（~/.ai-console-agent），再用新 token 重新运行 install.sh。`)) return
+              setReplaceTokenShown(null)
+              createEnrollToken.mutate(
+                { mode: "replace", target_server_id: id, expires_minutes: 30 },
+                {
+                  onSuccess: (r) => setReplaceTokenShown(r.token),
+                  onError: (e: any) => alert(`生成 token 失败：${String(e?.message || e)}`),
+                }
+              )
+            }}
+          >
+            {createEnrollToken.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <PackageOpen className="mr-1 h-4 w-4" />}
+            重装/恢复
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="text-destructive"
+            disabled={deleteServer.isPending}
+            onClick={() => {
+              if (!id) return
+              if (confirm(`删除服务器「${server.name}」？这只会删除控制台记录，不会停止目标机器上的 agent。`)) {
+                deleteServer.mutate(id, { onSuccess: () => navigate("/servers") })
+              }
+            }}
+          >
+            <Trash2 className="mr-1 h-4 w-4" /> 删除
+          </Button>
+        </div>
       </div>
+      {replaceTokenShown && (
+        <Card className="border-dashed">
+          <CardContent className="space-y-2 p-4 text-sm">
+            <p className="font-medium">一次性重装 token（30 分钟内有效）</p>
+            <p className="text-xs text-muted-foreground">在目标机器上先执行 <code>bash &lt;(curl -fsSL {location.origin}/agent/uninstall.sh)</code>，再执行下方命令：</p>
+            <pre className="overflow-auto rounded bg-muted p-2 text-xs"><code>{`TOKEN='${replaceTokenShown}' SERVER='${location.origin}' sh -c "$(curl -fsSL '${location.origin}/agent/install.sh')"`}</code></pre>
+            <p className="text-xs text-muted-foreground">重装后此机器会以新的 agent_instance_id 上线；旧 WS 连接会被服务端强制关闭。</p>
+          </CardContent>
+        </Card>
+      )}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList className="w-full justify-start overflow-x-auto">
           <TabsTrigger value="overview">概览</TabsTrigger>
