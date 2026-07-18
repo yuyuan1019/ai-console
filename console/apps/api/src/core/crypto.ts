@@ -79,3 +79,7 @@ export function verifyPassword(password: string, stored: string): boolean {
 export function hashToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex")
 }
+
+export function sha256Hex(value: string): string {
+  return crypto.createHash("sha256").update(value, "utf8").digest("hex")
+}

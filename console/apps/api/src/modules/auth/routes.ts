@@ -34,6 +34,36 @@ function clearRefreshCookie(reply: any) {
   )
 }
 
+// ponytail (bug 21): 单次有效 WS 票据。30s 有效，consume 时即删。即便票据泄漏进
+// WS 握手的访问日志，也已消费；即便未消费也仅 30s 失效——严格优于把 15 分钟的
+// access JWT 放进 URL query（?token=）。
+const wsTickets = new Map<string, { userId: string; expiresAt: number }>()
+let wsTicketCleanupStarted = false
+
+export function issueWsTicket(userId: string): { ticket: string; expires_in: number } {
+  if (!wsTicketCleanupStarted) {
+    wsTicketCleanupStarted = true
+    const handle = setInterval(() => {
+      const now = Date.now()
+      for (const [k, v] of wsTickets) if (v.expiresAt < now) wsTickets.delete(k)
+    }, 60_000)
+    if (typeof handle.unref === "function") handle.unref()
+  }
+  const ticket = b64url(crypto.randomBytes(32))
+  wsTickets.set(ticket, { userId, expiresAt: Date.now() + 30_000 })
+  return { ticket, expires_in: 30 }
+}
+
+export function consumeWsTicket(ticket: string): AuthUser | null {
+  const entry = wsTickets.get(ticket)
+  if (!entry) return null
+  wsTickets.delete(ticket) // single-use：必须先删再判过期
+  if (entry.expiresAt < Date.now()) return null
+  const row = db.prepare("SELECT id, username, role FROM users WHERE id=?").get(entry.userId) as any
+  if (!row) return null
+  return { id: row.id, username: row.username, role: row.role as Role }
+}
+
 function createSession(user: AuthUser, req: any, reply: any): { accessToken: string; user: AuthUser } {
   const sessionId = crypto.randomUUID()
   const secret = b64url(crypto.randomBytes(32))
@@ -45,32 +75,52 @@ function createSession(user: AuthUser, req: any, reply: any): { accessToken: str
   return { accessToken: signJwt(user), user }
 }
 
-function rotateSession(refreshToken: string, reply: any): { accessToken: string; user: AuthUser } | null {
+// ponytail (BUG-03): rotateSession used to return `null` for three distinct
+// situations — invalid, replay, and "another concurrent request already
+// rotated this same session very recently". The /refresh handler couldn't
+// tell them apart and cleared the refresh cookie in all three cases, so two
+// tabs racing each other on the same access-expired page would both end up
+// logged out. Switch to a discriminated union so the handler can distinguish
+// recoverable races from real invalidation.
+type RotateResult =
+  | { kind: "ok"; session: { accessToken: string; user: AuthUser } }
+  | { kind: "recent_rotation" }
+  | { kind: "invalid" }
+  | { kind: "replay" }
+
+function rotateSession(refreshToken: string, reply: any): RotateResult {
   const [sessionId, secret] = refreshToken.split(".")
-  if (!sessionId || !secret) return null
+  if (!sessionId || !secret) return { kind: "invalid" }
   const row = db
     .prepare(
-      `SELECT s.id AS session_id, s.refresh_token_hash, s.revoked_at,
+      `SELECT s.id AS session_id, s.refresh_token_hash, s.revoked_at, s.rotated_at,
               u.id, u.username, u.role
        FROM sessions s JOIN users u ON u.id=s.user_id
        WHERE s.id=?`
     )
     .get(sessionId) as any
-  if (!row || row.revoked_at) return null
+  if (!row || row.revoked_at) return { kind: "invalid" }
   if (row.refresh_token_hash !== hashToken(secret)) {
+    // ponytail (BUG-03): concurrent refresh — the loser sees the winner's new
+    // hash and would otherwise be treated as a replay. If the session was
+    // rotated within the last 30s, treat as a recent-rotation race: do NOT
+    // revoke, do NOT clear cookie, do NOT sign a new access token here (the
+    // caller must retry so it picks up the winner's cookie).
+    if (row.rotated_at && Date.now() - row.rotated_at < 30_000) return { kind: "recent_rotation" }
     db.prepare("UPDATE sessions SET revoked_at=? WHERE id=?").run(Date.now(), sessionId)
     audit(row.id, "auth.replay_detected", `session:${sessionId}`)
-    return null
+    return { kind: "replay" }
   }
   const nextSecret = b64url(crypto.randomBytes(32))
-  db.prepare("UPDATE sessions SET refresh_token_hash=?, last_active_at=? WHERE id=?").run(
+  db.prepare("UPDATE sessions SET refresh_token_hash=?, rotated_at=?, last_active_at=? WHERE id=?").run(
     hashToken(nextSecret),
+    Date.now(),
     Date.now(),
     sessionId
   )
   setRefreshCookie(reply, `${sessionId}.${nextSecret}`, Date.now() + REFRESH_TTL_MS)
   const user = { id: row.id, username: row.username, role: row.role as Role }
-  return { accessToken: signJwt(user), user }
+  return { kind: "ok", session: { accessToken: signJwt(user), user } }
 }
 
 export function registerAuthRoutes(app: FastifyInstance) {
@@ -150,21 +200,42 @@ export function registerAuthRoutes(app: FastifyInstance) {
 
   app.post("/api/auth/refresh", async (req, reply) => {
     const token = parseCookies(req.headers.cookie)[COOKIE_NAME]
-    const session = token ? rotateSession(token, reply) : null
-    if (!session) {
+    if (!token) {
       clearRefreshCookie(reply)
       return reply.code(401).send({ error: "unauthorized" })
     }
-    return session
+    const result = rotateSession(token, reply)
+    if (result.kind === "ok") return result.session
+    if (result.kind === "recent_rotation") {
+      // ponytail (BUG-03): do NOT clear cookie, do NOT sign a new access
+      // token. The winning request has already written a fresh cookie; the
+      // client must retry so its next request uses that cookie. Signing a
+      // new access token here would let a stolen old refresh token continue
+      // minting access tokens during the 30s grace window.
+      return reply.code(409).send({ error: "refresh_already_rotated" })
+    }
+    // invalid / replay
+    clearRefreshCookie(reply)
+    return reply.code(401).send({ error: "unauthorized" })
   })
 
   app.get("/api/auth/me", async (req, reply) => {
+    // ponytail (BUG-03): /auth/me used to implicitly rotate the refresh
+    // cookie when access JWT was missing/expired. That caused a GET to have
+    // side effects and made it impossible for the client's single-flight
+    // refresh to cover both /me and /ws-ticket during expiry. Now /me only
+    // trusts the access JWT; the client must call /refresh explicitly.
     const user = authFromRequest(req)
-    if (user) return { user }
-    const token = parseCookies(req.headers.cookie)[COOKIE_NAME]
-    const session = token ? rotateSession(token, reply) : null
-    if (!session) return reply.code(401).send({ error: "unauthorized" })
-    return session
+    if (!user) return reply.code(401).send({ error: "unauthorized" })
+    return { user }
+  })
+
+  app.post("/api/auth/ws-ticket", async (req, reply) => {
+    // ponytail (bug 21): /api/auth/* 在 middleware/auth.ts 是公开例外（不走全局 JWT
+    // 钩子），所以这里必须显式 authFromRequest——否则任何人都能匿名领票连 WS。
+    const user = authFromRequest(req)
+    if (!user) return reply.code(401).send({ error: "unauthorized" })
+    return issueWsTicket(user.id)
   })
 
   app.post("/api/auth/logout", async (req, reply) => {

@@ -9,7 +9,7 @@ import { productionCheck, runMigrations, WEB_DIST_PATH } from "./core/db"
 import { db } from "./core/db"
 import { registerHooks } from "./middleware/auth"
 import { registerAuthRoutes } from "./modules/auth/routes"
-import { registerAgentRoutes } from "./modules/agent/routes"
+import { registerAgentRoutes, broadcastBatchProgressForTask, dispatchNextTask } from "./modules/agent/routes"
 import { registerProvidersRoutes } from "./modules/providers/routes"
 import { registerServersRoutes } from "./modules/servers/routes"
 import { registerBatchRoutes } from "./modules/batch/routes"
@@ -72,13 +72,72 @@ setInterval(() => {
   db.prepare("UPDATE servers SET status='offline' WHERE status='online' AND last_seen < ?").run(cutoff)
 }, 30_000)
 
+// ponytail (bug 5/4): task reaper. pushTaskToAgent (WS) 与 GET /agent/tasks (REST)
+// 认领时都写 expires_at=now+5min，但之前全仓库无人读 expires_at——agent 崩溃/被 kill
+// 或 upgrade_agent 自重启(os.Exit) 后任务永远 running，WS 重连 flush 与 GET /agent/tasks
+// 都只 SELECT status='pending'，跳过它。这里每 30s：(a) 把过期 running 回收到 pending
+// 让重连/轮询重新领取；(b) attempt_count>=3 的直接判 failed（BUG-05：avoid infinite
+// retry after agent crash-loops on the same task）；(c) 把长期 pending 且目标离线
+// >10min 的判 failed 让 batch_jobs 能 finalize（bug 4）。每触及一个 task_id
+// 广播一次，让 WS 侧 batch 状态机也跑起来；被空出的 server slot 也调 dispatchNextTask。
+setInterval(() => {
+  const now = Date.now()
+  const offlineCutoff = now - 10 * 60_000
+  // ponytail (BUG-05): first, promote attempt_count>=3 stale claims to failed
+  // WITHOUT bouncing them back to pending. Otherwise a task the agent can
+  // never complete would spin forever.
+  const failedByAttempts = db
+    .prepare(
+      `UPDATE agent_tasks
+          SET status='failed', error='task lease expired after 3 attempts', finished_at=?
+        WHERE status='running' AND expires_at IS NOT NULL AND expires_at < ?
+          AND attempt_count >= 3`
+    )
+    .run(now, now)
+  const requeued = db
+    .prepare(
+      `UPDATE agent_tasks
+          SET status='pending', claimed_at=NULL, nonce=NULL, expires_at=NULL
+        WHERE status='running' AND expires_at IS NOT NULL AND expires_at < ?
+          AND attempt_count < 3`
+    )
+    .run(now)
+  const failed = db
+    .prepare(
+      `UPDATE agent_tasks
+          SET status='failed', error='target agent offline > 10min', finished_at=?
+        WHERE status='pending' AND created_at < ?
+          AND server_id IN (SELECT id FROM servers WHERE status='offline' AND (last_seen IS NULL OR last_seen < ?))`
+    )
+    .run(now, offlineCutoff, offlineCutoff)
+  if (failedByAttempts.changes || requeued.changes || failed.changes) {
+    for (const job of db.prepare("SELECT progress_json FROM batch_jobs WHERE status IN ('running','rolling_back')").all() as any[]) {
+      let entries: any[] = []
+      try { entries = JSON.parse(job.progress_json || "[]") } catch {}
+      for (const e of entries) if (e.task_id) broadcastBatchProgressForTask(e.task_id)
+    }
+    // ponytail (BUG-05): reaping frees per-server dispatch slots. Poke every
+    // affected server so the next pending task moves without waiting for a
+    // heartbeat.
+    const servers = db
+      .prepare("SELECT DISTINCT server_id FROM agent_tasks WHERE status='pending'")
+      .all() as Array<{ server_id: string }>
+    for (const s of servers) dispatchNextTask(s.server_id)
+  }
+}, 30_000)
+
 // SPA fallback
 app.get("/*", async (req, reply) => {
   if (req.url.startsWith("/api/")) return reply.code(404).send({ error: "not found" })
   const pathname = decodeURIComponent(req.url.split("?")[0] || "/")
   const rel = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "")
   const filePath = path.resolve(WEB_DIST_PATH, rel)
-  const target = filePath.startsWith(WEB_DIST_PATH) && fs.existsSync(filePath) ? filePath : path.join(WEB_DIST_PATH, "index.html")
+  // ponytail: 用 path.relative 做规范围栏检查。WEB_DIST_PATH 结尾是 'dist' 无分隔符，
+  // 裸 startsWith 会让 /%2e%2e/dist.bak/... 解码后通过前缀检查，泄漏同级 dist.bak/
+  // dist.old/ dist2 里的旧构建（bug 12）。
+  const relToDist = path.relative(WEB_DIST_PATH, filePath)
+  const within = relToDist !== "" && !relToDist.startsWith("..") && !path.isAbsolute(relToDist)
+  const target = within && fs.existsSync(filePath) ? filePath : path.join(WEB_DIST_PATH, "index.html")
   const ext = path.extname(target)
   const type = ext === ".html" ? "text/html" : ext === ".js" ? "text/javascript" : ext === ".css" ? "text/css" : "application/octet-stream"
   return reply.type(type).send(fs.createReadStream(target))
