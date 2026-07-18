@@ -41,8 +41,8 @@ function buildWhere(q: any): { where: string; params: any[] } {
 export function registerAuditRoutes(app: FastifyInstance) {
   app.get("/api/audit", async (req) => {
     const q = req.query as any
-    const limit = Math.min(Number(q?.limit || 100), 500)
-    const offset = Math.max(0, Number(q?.offset || 0))
+    const limit = Math.min(Math.max(1, parseInt(String(q?.limit ?? "100"), 10) || 100), 500)
+    const offset = Math.max(0, parseInt(String(q?.offset ?? "0"), 10) || 0)
     const { where, params } = buildWhere(q)
 
     const sql = `SELECT a.id,a.action,a.target,before_json,after_json,a.ts,a.request_id,

@@ -6,8 +6,8 @@ import type { AuthUser } from "../../core/constants"
 export function registerImportJobsRoutes(app: FastifyInstance) {
   app.get("/api/import-jobs", async (req) => {
     const q = req.query as any
-    const limit = Math.min(Number(q?.limit || 50), 200)
-    const offset = Math.max(0, Number(q?.offset || 0))
+    const limit = Math.min(Math.max(1, parseInt(String(q?.limit ?? "50"), 10) || 50), 200)
+    const offset = Math.max(0, parseInt(String(q?.offset ?? "0"), 10) || 0)
     const rows = db.prepare(
       "SELECT id, source_type, source_path, status, counts_json, started_by, started_at, finished_at FROM import_jobs ORDER BY started_at DESC LIMIT ? OFFSET ?"
     ).all(limit, offset) as any[]
@@ -34,7 +34,8 @@ export function registerImportJobsRoutes(app: FastifyInstance) {
     try { stored = JSON.parse(row.counts_json || "{}") } catch { stored = {} }
 
     const ids = stored.created || {}
-    const cleaned = { providers: 0, keys: 0, models: 0, endpoints: 0, pricing: 0 }
+    const cleaned: { providers: number; keys: number; models: number; endpoints: number; pricing: number; pricing_restored: number } =
+      { providers: 0, keys: 0, models: 0, endpoints: 0, pricing: 0, pricing_restored: 0 }
 
     db.exec("BEGIN")
     try {
@@ -65,9 +66,30 @@ export function registerImportJobsRoutes(app: FastifyInstance) {
           cleaned.endpoints += Number(r.changes)
         }
       }
-      if (ids.pricing_count) {
-        cleaned.pricing = ids.pricing_count
+      // ponytail: 原逻辑只把 pricing_count 当数字记一笔、从不 DELETE，谎报已清理（bug 19）。
+      // 改为按导入时记录的 pricing_model_ids 真删，并尽力恢复被 INSERT OR REPLACE 覆盖的旧行。
+      // 旧 job 的 counts_json 无 pricing_model_ids → 跳过、报 pricing=0（诚实）。
+      let pricingDeleted = 0
+      if (Array.isArray(ids.pricing_model_ids) && ids.pricing_model_ids.length) {
+        const placeholders = ids.pricing_model_ids.map(() => "?").join(",")
+        pricingDeleted = Number(
+          db.prepare(`DELETE FROM model_pricing WHERE model_id IN (${placeholders})`).run(...ids.pricing_model_ids).changes
+        )
       }
+      if (Array.isArray(ids.pricing_overwritten) && ids.pricing_overwritten.length) {
+        const restoreStmt = db.prepare(
+          `INSERT OR REPLACE INTO model_pricing(model_id,display_name,input_cost_per_million,output_cost_per_million,cache_read_cost_per_million,cache_creation_cost_per_million)
+           VALUES(?,?,?,?,?,?)`
+        )
+        for (const p of ids.pricing_overwritten) {
+          restoreStmt.run(
+            p.model_id, p.display_name, p.input_cost_per_million, p.output_cost_per_million,
+            p.cache_read_cost_per_million || "0", p.cache_creation_cost_per_million || "0"
+          )
+          cleaned.pricing_restored++
+        }
+      }
+      cleaned.pricing = pricingDeleted - cleaned.pricing_restored
 
       db.prepare("UPDATE import_jobs SET status='rolled_back', finished_at=? WHERE id=?").run(Date.now(), row.id)
       db.exec("COMMIT")

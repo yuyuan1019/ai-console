@@ -13,8 +13,22 @@ import { AuditPage } from "@/pages/AuditPage"
 import { BatchPage } from "@/pages/BatchPage"
 import { SettingsPage } from "@/pages/SettingsPage"
 import { AuthProvider, useAuth } from "@/lib/auth"
+import { Toaster, toastError } from "@/lib/toast"
 
-const queryClient = new QueryClient()
+// ponytail (bug 22): 全局 mutation 错误兜底。ServerDetailPage 的 setCredential /
+// removeCredential / writeConfig 等 mutate() 无 onError——viewer 点「下发凭据」会
+// 在 onRequest 钩子里 403（createAgentTask 之前），任务列表也无从展示，spinner
+// 一停了之、看似成功。这里把所有 mutation 失败统一弹 toast。
+const queryClient = new QueryClient({
+  defaultOptions: {
+    mutations: {
+      onError: (e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e)
+        toastError(`操作失败：${msg}`)
+      },
+    },
+  },
+})
 
 function WithShell({ children }: { children: ReactNode }) {
   return <AppShell>{children}</AppShell>
@@ -61,6 +75,7 @@ export default function App() {
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </BrowserRouter>
+        <Toaster />
       </AuthProvider>
     </QueryClientProvider>
   )

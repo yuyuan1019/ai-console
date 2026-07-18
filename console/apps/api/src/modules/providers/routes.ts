@@ -95,7 +95,24 @@ export function registerProvidersRoutes(app: FastifyInstance) {
     }
 
     const counts = { providers: 0, keys: 0, oauth: 0, models: 0, endpoints: 0, pricing: 0 }
-    const createdIds = { provider_ids: [] as string[], key_ids: [] as string[], model_ids: [] as string[], endpoint_ids: [] as number[], pricing_count: 0 }
+    const createdIds = {
+      provider_ids: [] as string[],
+      key_ids: [] as string[],
+      model_ids: [] as string[],
+      endpoint_ids: [] as number[],
+      pricing_count: 0,
+      // ponytail (bug 19): 记录本次写入的 model_id 与被 INSERT OR REPLACE 覆盖的旧行快照，
+      // 供回滚真删 + 尽力恢复，替代原先只存计数的谎报。
+      pricing_model_ids: [] as string[],
+      pricing_overwritten: [] as Array<{
+        model_id: string
+        display_name: string
+        input_cost_per_million: string
+        output_cost_per_million: string
+        cache_read_cost_per_million: string
+        cache_creation_cost_per_million: string
+      }>,
+    }
     db.exec("BEGIN")
     try {
       for (const p of input.providers) {
@@ -172,19 +189,30 @@ export function registerProvidersRoutes(app: FastifyInstance) {
         }
       }
 
+      const seenPricingModelIds = new Set<string>()
       for (const m of input.model_pricing || []) {
         if (!m?.model_id) continue
+        const mid = String(m.model_id)
+        // 首次触及某 model_id 时快照其原值，供回滚恢复（INSERT OR REPLACE 会静默覆盖）
+        if (!seenPricingModelIds.has(mid)) {
+          seenPricingModelIds.add(mid)
+          const prev = db.prepare(
+            "SELECT model_id,display_name,input_cost_per_million,output_cost_per_million,cache_read_cost_per_million,cache_creation_cost_per_million FROM model_pricing WHERE model_id=?"
+          ).get(mid) as any
+          if (prev) createdIds.pricing_overwritten.push(prev)
+        }
         db.prepare(
           `INSERT OR REPLACE INTO model_pricing(model_id,display_name,input_cost_per_million,output_cost_per_million,cache_read_cost_per_million,cache_creation_cost_per_million)
            VALUES(?,?,?,?,?,?)`
         ).run(
-          String(m.model_id),
+          mid,
           String(m.display_name || m.model_id),
           String(m.input_cost_per_million || "0"),
           String(m.output_cost_per_million || "0"),
           String(m.cache_read_cost_per_million || "0"),
           String(m.cache_creation_cost_per_million || "0")
         )
+        createdIds.pricing_model_ids.push(mid)
         counts.pricing++
       }
       createdIds.pricing_count = counts.pricing

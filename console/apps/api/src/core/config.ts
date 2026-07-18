@@ -244,6 +244,14 @@ export function generateConfig(tool: string, opts: {
           toml = toml.replace(headerRe, `$1\nrequires_openai_auth = true`)
         } else {
           toml += `\n\n[model_providers.${providerId}]\nname = "${providerLabel}"\nbase_url = "${openAiBaseUrl}"\nwire_api = "responses"\nrequires_openai_auth = true`
+          // ponytail: 追加的 [model_providers.<providerId>] 段只有顶层 model_provider
+          // 指向它才生效——否则 codex 仍用内置 provider，自定义 base_url 失效、
+          // ~/.codex/auth.json 的 key 打到错误端点（bug 7）。对齐下方 no-raw 分支。
+          if (mpIdMatch) {
+            toml = toml.replace(/^[ \t]*model_provider[ \t]*=[ \t]*["'][^"']*["']/m, `model_provider = "${providerId}"`)
+          } else {
+            toml = `model_provider = "${providerId}"\n` + toml
+          }
         }
       }
       return { content: toml, format: "toml" }
@@ -315,8 +323,16 @@ export function mergeOpenCodeConfig(entries: {
   apiFormat?: string | null
 }[]): any {
   const config: any = { provider: {} }
+  const seen = new Set<string>()
   for (const entry of entries) {
-    const single = buildOpenCodeConfig(entry)
+    // ponytail: providerId 派生自 provider_name+group_name（非 DB UUID），同名同组
+    // 必撞；Object.assign 会用第二个覆盖第一个的凭据，而 config.model 仍指向第一个
+    // providerId → 默认模型解析到第二个凭据、第一个凭据静默丢失（bug 8）。去重加后缀。
+    let pid = entry.providerId
+    let n = 2
+    while (seen.has(pid)) pid = `${entry.providerId}-${n++}`
+    seen.add(pid)
+    const single = buildOpenCodeConfig({ ...entry, providerId: pid })
     Object.assign(config.provider, single.provider)
   }
   const first = entries[0]

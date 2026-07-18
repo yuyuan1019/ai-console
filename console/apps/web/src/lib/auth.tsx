@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
-import { api, setAccessToken, type AuthUser } from "@/lib/api"
+import { api, getAccessToken, setAccessToken, type AuthUser } from "@/lib/api"
 import { initWS, closeWS } from "@/lib/ws"
 
 interface AuthContextValue {
@@ -17,6 +17,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     let active = true
+    // ponytail (bug 20): /auth/me 在 JWT 仍有效时只返回 {user}（无 accessToken），
+    // 若把 initWS 耦合在 me() 返回的 accessToken 上，15 分钟内每次刷新都不起 WS，
+    // 只剩 10s 轮询兜底。改为挂载即用 localStorage 里的 token 起 WS，me() 并行跑。
+    // 依赖已修的 401 拦截器 + ws.ts 4001-onclose refresh 路径保持 token 新鲜。
+    const tok = getAccessToken()
+    if (tok) initWS(tok)
     api
       .me()
       .then((res) => {
@@ -29,6 +35,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       })
       .catch(() => {
         if (!active) return
+        closeWS()
         setAccessToken(null)
         setUser(null)
       })
