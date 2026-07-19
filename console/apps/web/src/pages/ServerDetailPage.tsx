@@ -149,11 +149,27 @@ export function ServerDetailPage() {
     const k = credKeys.find((x) => x.id === credKeyId)
     if (!k) return {}
     const baseUrl = (credProviderDetail?.base_url || "").replace(/\/+$/, "")
-    if (tool === "claude") {
-      return { ANTHROPIC_AUTH_TOKEN: "sk-***", ANTHROPIC_BASE_URL: baseUrl }
+    if (tool === "codex") {
+      return {
+        "配置文件": "~/.codex/config.toml",
+        "凭据文件": "~/.codex/auth.json (OPENAI_API_KEY)",
+        "Base URL": baseUrl || "—",
+      }
     }
-    if (tool === "codex") return { OPENAI_API_KEY: "sk-***" }
-    if (tool === "gemini") return { GEMINI_API_KEY: "sk-***", GOOGLE_GEMINI_BASE_URL: baseUrl }
+    if (tool === "claude") {
+      return {
+        "配置文件": "~/.claude/settings.json",
+        "字段": "env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL",
+        "Base URL": baseUrl || "—",
+      }
+    }
+    if (tool === "gemini") {
+      return {
+        "配置文件": "~/.gemini/settings.json",
+        "字段": "env.GEMINI_API_KEY / GOOGLE_GEMINI_BASE_URL",
+        "Base URL": baseUrl || "—",
+      }
+    }
     if (tool === "opencode") {
       const modelId = k.default_model_id || credProviderDetail?.models[0]?.model_id || "—"
       return { "配置文件": "~/.config/opencode/opencode.json", "使用模型": modelId }
@@ -388,7 +404,7 @@ export function ServerDetailPage() {
                     onClick={() => setCredential.mutate({ tool, provider_id: credProviderId, key_id: credKeyId })}
                   >
                     {setCredential.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Key className="mr-1 h-3 w-3" />}
-                    {tool === "opencode" ? "下发配置" : "下发凭据"}
+                    下发配置
                   </Button>
                   <Button
                     size="sm"
@@ -396,7 +412,7 @@ export function ServerDetailPage() {
                     className="text-destructive"
                     disabled={removeCredential.isPending}
                     onClick={() => {
-                      if (confirm(`从 ${server.name} 卸载 ${tool} 的 key？会删除 agent 上的凭据文件和已写入工具配置中的 key。`)) {
+                      if (confirm(`从 ${server.name} 卸载 ${tool} 的配置？会删除凭据文件，并用最小配置覆盖工具配置文件（apikey 字段会被清空，其他自定义配置可能丢失）。`)) {
                         removeCredential.mutate({ tool, provider_id: credProviderId || undefined, key_id: credKeyId || undefined })
                       }
                     }}

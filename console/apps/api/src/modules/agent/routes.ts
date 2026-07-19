@@ -266,7 +266,7 @@ function materializeInnerPayload(action: string, payload: any): any {
     const keyId = payload.key_id ? String(payload.key_id).trim() : null
     const envKeys: string[] = []
     if (tool === "claude") envKeys.push("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")
-    else if (tool === "codex") envKeys.push("OPENAI_API_KEY", "OPENAI_BASE_URL")
+    else if (tool === "codex") envKeys.push("OPENAI_API_KEY")
     else if (tool === "gemini") envKeys.push("GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL")
     return { tool, provider_id: providerId, key_id: keyId, env_keys_to_remove: envKeys }
   }

@@ -244,45 +244,54 @@ export function registerServersRoutes(app: FastifyInstance) {
         .get(keyId, providerId) as any
       if (!key) return reply.code(404).send({ error: "key not found" })
 
-      if (tool === "opencode") {
-        // ponytail (BUG-01): opencode delivery = provider_refs write_config,
-        // not a plaintext generate here. Console-side generateConfig would
-        // land the apiKey in payload_json / audit_log / result_json. Push a
-        // ref instead and let materializeTaskPayload do the generation on
-        // dispatch. Validate the model exists first for fast 400s.
-        const keyDetail = db
-          .prepare(`SELECT k.default_model_id FROM provider_keys k
-                    WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
-          .get(keyId, providerId) as any
-        const modelId = keyDetail?.default_model_id ||
-          (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id LIMIT 1").get(providerId) as any)?.model_id
-        if (!modelId) return reply.code(400).send({ error: "no model available for this provider" })
-        return reply.code(201).send(createAgentTask(
-          req.params.id,
-          user.id,
-          "write_config",
-          { tool: "opencode", source: "provider_refs", redacted: true },
-          {
-            sensitivePayload: {
-              tool: "opencode",
-              source: "provider_refs",
-              entries: [{ provider_id: providerId, key_id: keyId, model_id: modelId }],
-            },
-            auditMeta: { tool: "opencode", provider_ids: [providerId], key_ids: [keyId], model_ids: [modelId] },
-          }
-        ))
-      }
+      // ponytail: 统一下发。所有工具都走 write_config（provider_refs 源），
+      // 以前只有 opencode 这么做。materializeTaskPayload 在 dispatch 时按工具
+      // 生成原生配置，明文从不落到 payload_json / audit_log / result_json。
+      //   - claude/gemini/opencode: 单个 write_config（apikey 已嵌入
+      //     settings.json env 块 / opencode.json provider options）。
+      //   - codex: write_config（config.toml，按 spec 不含 key）后跟第二个
+      //     set_credential 任务写 ~/.codex/auth.json。per-server 单任务不变式
+      //     保证两者顺序执行。先校验 model 可用，快速 400。
+      const keyDetail = db
+        .prepare(`SELECT k.default_model_id FROM provider_keys k
+                  WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
+        .get(keyId, providerId) as any
+      const modelId = keyDetail?.default_model_id ||
+        (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id LIMIT 1").get(providerId) as any)?.model_id
+      if (!modelId) return reply.code(400).send({ error: "no model available for this provider" })
 
-      return reply.code(201).send(createAgentTask(
+      const writeConfigTask = createAgentTask(
         req.params.id,
         user.id,
-        "set_credential",
+        "write_config",
         { tool, source: "provider_refs", redacted: true },
         {
-          sensitivePayload: { tool, provider_id: providerId, key_id: keyId },
-          auditMeta: { tool, provider_ids: [providerId], key_ids: [keyId] },
+          sensitivePayload: {
+            tool,
+            source: "provider_refs",
+            entries: [{ provider_id: providerId, key_id: keyId, model_id: modelId }],
+          },
+          auditMeta: { tool, provider_ids: [providerId], key_ids: [keyId], model_ids: [modelId] },
         }
-      ))
+      )
+
+      if (tool === "codex") {
+        // ponytail: codex 下发拆成 config.toml (write_config，已派发) +
+        // ~/.codex/auth.json (set_credential，排队在后)。两者都是 codex 鉴权
+        // 必需——少一个 codex 都跑不起来。
+        createAgentTask(
+          req.params.id,
+          user.id,
+          "set_credential",
+          { tool, source: "provider_refs", redacted: true },
+          {
+            sensitivePayload: { tool, provider_id: providerId, key_id: keyId },
+            auditMeta: { tool, provider_ids: [providerId], key_ids: [keyId] },
+          }
+        )
+      }
+
+      return reply.code(201).send(writeConfigTask)
     }
   )
 
@@ -309,6 +318,45 @@ export function registerServersRoutes(app: FastifyInstance) {
       const providerId = req.body?.provider_id ? String(req.body.provider_id).trim() : null
       const keyId = req.body?.key_id ? String(req.body.key_id).trim() : null
       if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "unsupported tool for credential removal" })
+
+      // ponytail: 卸载需要真正清空配置文件里的 apikey 字段，而不只是删凭据文件。
+      //   - codex: config.toml 按 spec 本来就不含 apikey，仅 remove_credential
+      //     删 ~/.codex/auth.json 即可。
+      //   - claude/gemini: 先 write_config 把 settings.json 覆盖为最小内容
+      //     （清空 env 块），再 remove_credential 删遗留 creds/<tool>.sh。
+      //   - opencode: 仅 write_config 把 opencode.json 重置为最小内容
+      //     （清空 provider 块）。
+      // scrubbed 内容无 secret，直接进 payload_json（不走 sensitivePayload）。
+      if (tool === "claude" || tool === "gemini") {
+        const scrubbed = tool === "claude"
+          ? { env: {} }
+          : { selectedAuthType: "GEMINI_API_KEY", env: {} }
+        const writeTask = createAgentTask(
+          req.params.id,
+          user.id,
+          "write_config",
+          { tool, format: "json", content: JSON.stringify(scrubbed) },
+          { auditMeta: { tool, action: "scrub_config_on_remove", provider_id: providerId, key_id: keyId } }
+        )
+        createAgentTask(
+          req.params.id,
+          user.id,
+          "remove_credential",
+          { tool, provider_id: providerId, key_id: keyId }
+        )
+        return reply.code(201).send(writeTask)
+      }
+
+      if (tool === "opencode") {
+        return reply.code(201).send(createAgentTask(
+          req.params.id,
+          user.id,
+          "write_config",
+          { tool, format: "json", content: JSON.stringify({ $schema: "https://opencode.ai/config.json" }) },
+          { auditMeta: { tool, action: "scrub_config_on_remove", provider_id: providerId, key_id: keyId } }
+        ))
+      }
+
       return reply.code(201).send(createAgentTask(req.params.id, user.id, "remove_credential", { tool, provider_id: providerId, key_id: keyId }))
     }
   )

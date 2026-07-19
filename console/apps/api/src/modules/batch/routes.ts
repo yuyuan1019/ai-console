@@ -182,6 +182,24 @@ export function registerBatchRoutes(app: FastifyInstance) {
         })
         insertedIds.push(task.id)
         progress.push({ server_id: sid, server_name: server.name, task_id: task.id, state: "pending" })
+
+        // ponytail: codex 还需要第二个 set_credential 任务写 ~/.codex/auth.json
+        // （config.toml 按 spec 不含 key，必须走单独文件）。codex batch 走单 key
+        // 路径（与 claude/gemini/opencode 单 key 一致），sensitivePayload 用
+        // set_credential 期望的 {tool, provider_id, key_id} 形状，不是 provider_refs。
+        if (tool === "codex") {
+          const ke = keyEntries[0]
+          const credTask = insertAgentTask(sid, user.id, "set_credential", safePlaceholder, {
+            sensitivePayload: { tool, provider_id: ke.providerId, key_id: ke.keyId },
+            auditMeta: {
+              tool,
+              provider_ids: [ke.providerId],
+              key_ids: [ke.keyId],
+            },
+          })
+          insertedIds.push(credTask.id)
+          progress.push({ server_id: sid, server_name: server.name, task_id: credTask.id, state: "pending" })
+        }
       }
       db.prepare(
         "INSERT INTO batch_jobs(id,tool,source_type,source_ref,targets_json,status,progress_json,started_by,started_at) VALUES(?,?,?,?,?,?,?,?,?)"
