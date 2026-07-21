@@ -720,7 +720,7 @@ func (a *Agent) handleCmd(action string, payload []byte) (map[string]interface{}
 // validTools mirrors the toolConfigPath switch: only these tools may name a
 // credential or config file. Anything else is rejected to prevent
 // filepath.Join(credsDir, tool+".sh") from escaping credsDir (bug 13).
-var validTools = map[string]bool{"codex": true, "claude": true, "gemini": true, "opencode": true}
+var validTools = map[string]bool{"codex": true, "claude": true, "gemini": true, "opencode": true, "pi": true}
 
 func validTool(tool string) bool { return validTools[tool] }
 
@@ -848,6 +848,10 @@ func toolConfigPath(tool string) string {
 		return filepath.Join(home, ".gemini", "settings.json")
 	case "opencode":
 		return filepath.Join(home, ".config", "opencode", "opencode.json")
+	case "pi":
+		// ponytail: pi 读 ~/.pi/agent/models.json（自定义 provider/model 配置）。
+		// 凭据（apiKey）内联在 provider 块，与 opencode 同构——无独立凭据文件。
+		return filepath.Join(home, ".pi", "agent", "models.json")
 	}
 	return ""
 }
@@ -1247,7 +1251,7 @@ func (a *Agent) handleUpgradeTool(payload []byte) (map[string]interface{}, strin
 
 func detectTools() []map[string]interface{} {
 	var tools []map[string]interface{}
-	for _, t := range []string{"codex", "claude", "gemini", "opencode"} {
+	for _, t := range []string{"codex", "claude", "gemini", "opencode", "pi"} {
 		path, _ := exec.LookPath(t)
 		installed := path != ""
 		version := ""

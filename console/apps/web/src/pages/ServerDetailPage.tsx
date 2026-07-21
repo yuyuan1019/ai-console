@@ -142,6 +142,7 @@ export function ServerDetailPage() {
     if (tool === "claude") return p.families.includes("claude")
     if (tool === "gemini") return p.families.includes("gemini")
     if (tool === "opencode") return true
+    if (tool === "pi") return true
     return false
   })
   const credKeys = (credProviderDetail?.keys || []).filter((k) => k.enabled === 1)
@@ -173,6 +174,10 @@ export function ServerDetailPage() {
     if (tool === "opencode") {
       const modelId = k.default_model_id || credProviderDetail?.models[0]?.model_id || "—"
       return { "配置文件": "~/.config/opencode/opencode.json", "使用模型": modelId }
+    }
+    if (tool === "pi") {
+      const modelId = k.default_model_id || credProviderDetail?.models[0]?.model_id || "—"
+      return { "配置文件": "~/.pi/agent/models.json", "使用模型": modelId }
     }
     return {}
   }, [tool, credKeyId, credKeys, credProviderDetail])
@@ -433,6 +438,7 @@ export function ServerDetailPage() {
                     <option value="claude">claude</option>
                     <option value="gemini">gemini</option>
                     <option value="opencode">opencode</option>
+                    <option value="pi">pi</option>
                   </select>
                 </div>
                 <div className="flex items-center gap-2">
@@ -515,6 +521,7 @@ export function ServerDetailPage() {
                   <option value="claude">claude</option>
                   <option value="gemini">gemini</option>
                   <option value="opencode">opencode</option>
+                  <option value="pi">pi</option>
                 </select>
                 <Button disabled={readConfig.isPending} onClick={() => readConfig.mutate(tool)}>
                   {readConfig.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}

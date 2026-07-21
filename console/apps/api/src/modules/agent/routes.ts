@@ -8,7 +8,7 @@ import { currentRequestId } from "../../core/context"
 import { authFromRequest } from "../../middleware/auth"
 import { consumeWsTicket } from "../auth/routes"
 import type { AuthUser } from "../../core/constants"
-import { generateConfig, mergeOpenCodeConfig, withOpenAiV1 } from "../../core/config"
+import { generateConfig, mergeOpenCodeConfig, mergePiConfig, withOpenAiV1 } from "../../core/config"
 import path from "node:path"
 import fs from "node:fs"
 import { LINUX_INSTALL_SH } from "./installSh"
@@ -279,7 +279,7 @@ function materializeInnerPayload(action: string, payload: any): any {
     const tool = String(payload.tool || "").trim()
     const providerId = String(payload.provider_id || "").trim()
     const keyId = String(payload.key_id || "").trim()
-    if (!["codex", "claude", "gemini", "opencode"].includes(tool)) throw new Error("unsupported tool for credential delivery")
+    if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) throw new Error("unsupported tool for credential delivery")
     if (!providerId || !keyId) throw new Error("provider_id and key_id are required")
 
     const key = db
@@ -309,6 +309,9 @@ function materializeInnerPayload(action: string, payload: any): any {
       // ponytail: opencode reads ~/.config/opencode/opencode.json, NOT env vars.
       // Credentials travel via write_config (opencode.json has apiKey in
       // provider.options). set_credential env exports were useless. No-op here.
+    } else if (tool === "pi") {
+      // ponytail: pi reads ~/.pi/agent/models.json，apiKey 内联在 provider 块里
+      // （同 opencode）。凭据全部走 write_config，set_credential 这里 no-op。
     }
     return { tool, credentials }
   }
@@ -318,7 +321,7 @@ function materializeInnerPayload(action: string, payload: any): any {
 
 function materializeProviderRefs(payload: any): any {
   const tool = String(payload.tool || "").trim()
-  if (!["codex", "claude", "gemini", "opencode"].includes(tool)) throw new Error("unsupported tool for provider_refs")
+  if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) throw new Error("unsupported tool for provider_refs")
   const entries: Array<{ provider_id: string; key_id: string; model_id: string; primary?: boolean }> = Array.isArray(payload.entries) ? payload.entries : []
   if (entries.length === 0) throw new Error("provider_refs entries are required")
 
@@ -341,7 +344,10 @@ function materializeProviderRefs(payload: any): any {
     return { entry: e, key, secret, models, modelId, providerId, keyId }
   })
 
-  if (tool === "opencode" && resolved.length > 1) {
+  // ponytail: opencode 与 pi 都把多个 provider/key 合并进同一个 JSON 配置文件
+  // （opencode.json 的 provider 块 / models.json 的 providers 块）。两者的 built
+  // 数组形状完全一致，只是 merge 函数不同。
+  if ((tool === "opencode" || tool === "pi") && resolved.length > 1) {
     const sorted = [...resolved].sort((a, b) => (b.entry.primary ? 1 : 0) - (a.entry.primary ? 1 : 0))
     const built = sorted.map((r) => {
       const baseUrl = String(r.key.base_url || "").replace(/\/+$/, "")
@@ -352,13 +358,16 @@ function materializeProviderRefs(payload: any): any {
         providerId: derivedId,
         providerLabel,
         openAiBaseUrl: withOpenAiV1(baseUrl),
+        // ponytail: pi 的 anthropic/google provider 需纯 baseUrl（无 /v1），
+        // buildPiConfig 内部按 api 类型二选一；opencode 仍读 openAiBaseUrl。
+        baseUrl,
         apiKey: r.secret,
         model: r.modelId,
         models: r.models,
         apiFormat: r.key.api_format,
       }
     })
-    const merged = mergeOpenCodeConfig(built)
+    const merged = tool === "opencode" ? mergeOpenCodeConfig(built) : mergePiConfig(built)
     return { tool, format: "json", content: JSON.stringify(merged, null, 2) }
   }
 

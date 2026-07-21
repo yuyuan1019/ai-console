@@ -283,6 +283,14 @@ export function generateConfig(tool: string, opts: {
     return { content: JSON.stringify(config, null, 2), format: "json" }
   }
 
+  if (tool === "pi") {
+    // ponytail: pi 读 ~/.pi/agent/models.json。provider+apiKey+models 全部内联，
+    // 与 opencode 同构（单 JSON 文件，无独立凭据文件）。pi 通过 /model 交互选择
+    // 模型，故 models.json 没有顶层默认 model 字段（区别于 opencode 的 config.model）。
+    const config = buildPiConfig({ providerId, providerLabel, baseUrl, apiKey, model, models: opts.models, apiFormat: opts.api_format, raw })
+    return { content: JSON.stringify(config, null, 2), format: "json" }
+  }
+
   return { content: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model }, null, 2), format: "json" }
 }
 
@@ -339,5 +347,79 @@ export function mergeOpenCodeConfig(entries: {
   config.model = first ? `${first.providerId}/${first.model}` : ""
   if (!config.$schema) config.$schema = "https://opencode.ai/config.json"
   if (!config.agent) config.agent = { build: { options: { store: false } }, plan: { options: { store: false } } }
+  return config
+}
+
+// ponytail: 把 provider_keys.api_format（openai_responses|anthropic|gemini|""）映射到
+// pi models.json 的 api 字段。pi 支持 openai-completions / openai-responses /
+// anthropic-messages / google-generative-ai 四种；默认走 openai-completions（pi 文档
+// 标注为“most compatible”，最适合中转/代理类供应商）。
+export function piApiType(apiFormat?: string | null): string {
+  switch (String(apiFormat || "").trim()) {
+    case "anthropic":
+      return "anthropic-messages"
+    case "gemini":
+      return "google-generative-ai"
+    case "openai_responses":
+      return "openai-responses"
+    default:
+      return "openai-completions"
+  }
+}
+
+export function buildPiConfig(entry: {
+  providerId: string
+  providerLabel: string
+  baseUrl: string
+  apiKey: string
+  model: string
+  models?: string[]
+  apiFormat?: string | null
+  raw?: any
+}): any {
+  const api = piApiType(entry.apiFormat)
+  // ponytail: 对齐本仓库 codex/claude/gemini 的 baseUrl 约定。pi 文档示例：
+  // openai-completions 的 baseUrl 含 /v1（客户端不再拼），anthropic-messages /
+  // google-generative-ai 的 baseUrl 不含 /v1（客户端自己拼 /v1/messages、
+  // /v1beta/...）。若绕一用 withOpenAiV1，anthropic provider 会变成 .../v1，
+  // pi 再拼出 .../v1/v1/messages 双 /v1。
+  const usesOpenAiV1 = api === "openai-completions" || api === "openai-responses"
+  const finalBaseUrl = usesOpenAiV1 ? withOpenAiV1(entry.baseUrl) : entry.baseUrl
+  const config: any = entry.raw && typeof entry.raw === "object" ? { ...entry.raw } : {}
+  if (!config.providers) config.providers = {}
+  const modelList = entry.models && entry.models.length > 0 ? entry.models : [entry.model]
+  const models = modelList.map((id) => ({ id, name: id }))
+  config.providers[entry.providerId] = {
+    baseUrl: finalBaseUrl,
+    api,
+    apiKey: entry.apiKey,
+    models,
+  }
+  // ponytail: pi 没有 opencode 那样的顶层 config.model——pi 启动后用 /model 在所有
+  // 已配置 provider 的模型里交互选择。这里不设默认，避免误导。
+  return config
+}
+
+export function mergePiConfig(entries: {
+  providerId: string
+  providerLabel: string
+  baseUrl: string
+  apiKey: string
+  model: string
+  models?: string[]
+  apiFormat?: string | null
+}[]): any {
+  const config: any = { providers: {} }
+  const seen = new Set<string>()
+  for (const entry of entries) {
+    // ponytail: 同 mergeOpenCodeConfig——providerId 派生自 name+group，同名同组会在
+    // providers 对象里互相覆盖、静默丢凭据。去重加后缀。
+    let pid = entry.providerId
+    let n = 2
+    while (seen.has(pid)) pid = `${entry.providerId}-${n++}`
+    seen.add(pid)
+    const single = buildPiConfig({ ...entry, providerId: pid })
+    Object.assign(config.providers, single.providers)
+  }
   return config
 }

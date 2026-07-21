@@ -13,6 +13,7 @@ const TOOLS = [
   { key: "claude", label: "Claude Code", desc: "Anthropic Claude" },
   { key: "gemini", label: "Gemini", desc: "Google Gemini CLI" },
   { key: "opencode", label: "OpenCode", desc: "OpenCode editor · 支持多渠道" },
+  { key: "pi", label: "Pi", desc: "Pi 终端编码 agent · 支持多渠道" },
 ]
 
 export function BatchPage() {
@@ -34,11 +35,20 @@ export function BatchPage() {
   const { data: batchStatus } = useBatchStatus(batchId)
   const rollbackMut = useBatchRollback()
 
-  const eligibleServers = servers.filter((s) => s.status === "online" && (tool === "opencode" ? s.tools.some((t) => t === "opencode" || t === "codex") : s.tools.includes(tool)))
+  // ponytail: opencode 与 pi 都把多个 provider/key 合并进同一份 JSON 配置
+  // （opencode.json 的 provider 块 / models.json 的 providers 块），共享多渠道 UI。
+  const multiKeyTool = tool === "opencode" || tool === "pi"
+  const eligibleServers = servers.filter((s) => {
+    if (s.status !== "online") return false
+    // ponytail: opencode 可复用 codex 鉴权；pi 独立，仅看是否装了 pi 本体。
+    if (tool === "opencode") return s.tools.some((t) => t === "opencode" || t === "codex")
+    if (tool === "pi") return s.tools.includes("pi")
+    return s.tools.includes(tool)
+  })
 
   function generatePreview() {
     setPreview(null)
-    if (tool === "opencode" && selectedKeys.length > 0) {
+    if (multiKeyTool && selectedKeys.length > 0) {
       previewMut.mutate({ tool, keys: selectedKeys }, { onSuccess: setPreview, onError: (e) => alert(String(e)) })
     } else if (providerId && keyId && modelId) {
       previewMut.mutate({ tool, provider_id: providerId, key_id: keyId, model_id: modelId }, { onSuccess: setPreview, onError: (e) => alert(String(e)) })
@@ -58,7 +68,7 @@ export function BatchPage() {
     if (!confirm(`确认下发 ${tool} 配置到 ${selectedServers.size} 台机器？每台机器会先备份当前配置。`)) return
     const onSuccess = (r: { id: string }) => { setBatchId(r.id); setStep(4) }
     const onError = (e: Error) => alert(String(e))
-    if (tool === "opencode" && selectedKeys.length > 0) {
+    if (multiKeyTool && selectedKeys.length > 0) {
       executeMut.mutate(
         { tool, server_ids: [...selectedServers], keys: selectedKeys },
         { onSuccess, onError }
@@ -89,7 +99,7 @@ export function BatchPage() {
     })
   }
 
-  const canPreview = (tool === "opencode" && selectedKeys.length > 0) || (!!providerId && !!keyId && !!modelId)
+  const canPreview = (multiKeyTool && selectedKeys.length > 0) || (!!providerId && !!keyId && !!modelId)
 
   function addKeyEntry() {
     if (!providerId || !keyId || !modelId) return
@@ -109,7 +119,7 @@ export function BatchPage() {
   }
 
   const availableProviderKeys = providerDetail?.keys.filter((k) => k.enabled === 1 && !selectedKeys.some((sk) => sk.key_id === k.id)) || []
-  const multiKey = tool === "opencode" && selectedKeys.length > 0
+  const multiKey = multiKeyTool && selectedKeys.length > 0
   // ponytail (BUG-04): only enable rollback when the write pass is genuinely
   // terminal (done/partial). rolling_back/rolled_back/partial_rollback all
   // mean rollback is already unavailable; the server would 409/202 anyway,
@@ -179,13 +189,13 @@ export function BatchPage() {
             </div>
           )}
 
-          {tool === "opencode" && !multiKey && (
+          {multiKeyTool && !multiKey && (
             <Button size="sm" variant="outline" disabled={!providerId || !keyId || !modelId} onClick={() => { addKeyEntry(); setProviderId(""); setKeyId(""); setModelId(""); setPreview(null) }}>
               <Plus className="mr-1 h-3.5 w-3.5" /> 添加为渠道
             </Button>
           )}
 
-          {tool === "opencode" && multiKey && (
+          {multiKeyTool && multiKey && (
             <div className="space-y-3 max-w-2xl">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium">已选渠道 ({selectedKeys.length})</span>

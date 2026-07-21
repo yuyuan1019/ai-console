@@ -2,7 +2,7 @@ import type { FastifyInstance } from "fastify"
 import crypto from "node:crypto"
 import { db } from "../../core/db"
 import { decrypt } from "../../core/crypto"
-import { generateConfig, mergeOpenCodeConfig, withOpenAiV1 } from "../../core/config"
+import { generateConfig, mergeOpenCodeConfig, mergePiConfig, withOpenAiV1 } from "../../core/config"
 import { audit } from "../../core/audit"
 import { insertAgentTask, dispatchAgentTask, broadcastEvent } from "../agent/routes"
 import type { AuthUser } from "../../core/constants"
@@ -12,10 +12,10 @@ export function registerBatchRoutes(app: FastifyInstance) {
     "/api/batch/preview",
     async (req, reply) => {
       const tool = String(req.body?.tool || "").trim()
-      if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
+      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
 
       const keyEntries: Array<{ providerId: string; keyId: string; modelId: string; primary?: boolean }> = []
-      if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && tool === "opencode") {
+      if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && (tool === "opencode" || tool === "pi")) {
         for (const k of req.body!.keys) {
           const pid = String(k?.provider_id || "").trim()
           const kid = String(k?.key_id || "").trim()
@@ -31,9 +31,9 @@ export function registerBatchRoutes(app: FastifyInstance) {
         keyEntries.push({ providerId, keyId, modelId })
       }
 
-      if (tool === "opencode" && keyEntries.length > 1) {
+      if ((tool === "opencode" || tool === "pi") && keyEntries.length > 1) {
         const sorted = [...keyEntries].sort((a, b) => (b.primary ? 1 : 0) - (a.primary ? 1 : 0))
-        const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; apiKey: string; model: string; models?: string[]; apiFormat?: string | null }> = []
+        const entries: Array<{ providerId: string; providerLabel: string; openAiBaseUrl: string; baseUrl: string; apiKey: string; model: string; models?: string[]; apiFormat?: string | null }> = []
         for (const ke of sorted) {
           const key = db
             .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.auth_type, k.group_name, p.base_url, p.name AS provider_name
@@ -52,14 +52,19 @@ export function registerBatchRoutes(app: FastifyInstance) {
           entries.push({
             providerId, providerLabel,
             openAiBaseUrl: withOpenAiV1(baseUrl),
+            // ponytail: 同 agent/routes.ts——pi 合并需纯 baseUrl。
+            baseUrl,
             apiKey: secret,
             model: ke.modelId,
             models: allModels,
             apiFormat: key.api_format,
           })
         }
-        const merged = mergeOpenCodeConfig(entries)
-        return { tool, model: merged.model, content: JSON.stringify(merged, null, 2), format: "json" }
+        // ponytail: opencode 与 pi 的多渠道合并形状一致，仅 merge 函数不同。
+        // pi 的 models.json 无顶层 model 字段，这里用 primary（或首个）entry 的模型回填给 UI 预览。
+        const merged = tool === "opencode" ? mergeOpenCodeConfig(entries) : mergePiConfig(entries)
+        const previewModel = tool === "opencode" ? merged.model : (sorted.find((e) => e.primary)?.modelId || sorted[0]?.modelId || "")
+        return { tool, model: previewModel, content: JSON.stringify(merged, null, 2), format: "json" }
       }
 
       const ke = keyEntries[0]
@@ -108,11 +113,11 @@ export function registerBatchRoutes(app: FastifyInstance) {
     const user = (req as any).auth as AuthUser
     const tool = String(req.body?.tool || "").trim()
     const serverIds = Array.isArray(req.body?.server_ids) ? req.body!.server_ids!.map(String) : []
-    if (!["codex", "claude", "gemini", "opencode"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
+    if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
     if (serverIds.length === 0) return reply.code(400).send({ error: "server_ids required" })
 
     const keyEntries: Array<{ providerId: string; keyId: string; modelId: string; primary?: boolean }> = []
-    if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && tool === "opencode") {
+    if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && (tool === "opencode" || tool === "pi")) {
       for (const k of req.body!.keys) {
         const pid = String(k?.provider_id || "").trim()
         const kid = String(k?.key_id || "").trim()

@@ -1,18 +1,18 @@
 # AI Console
 
-统一管理多台服务器上 AI 编码工具（Codex CLI、Claude Code、Gemini CLI、OpenCode）配置与凭据的中心化 Web 控制台。
+统一管理多台服务器上 AI 编码工具（Codex CLI、Claude Code、Gemini CLI、OpenCode、Pi）配置与凭据的中心化 Web 控制台。
 
-A centralized web control panel for managing AI coding CLI tools (Codex CLI, Claude Code, Gemini CLI, OpenCode) across multiple remote Linux/macOS servers.
+A centralized web control panel for managing AI coding CLI tools (Codex CLI, Claude Code, Gemini CLI, OpenCode, Pi) across multiple remote Linux/macOS servers.
 
 ---
 
 ## 做什么的 / What It Does
 
-团队里每个人、每台开发机上都有 Codex / Claude / Gemini / OpenCode 这些 AI 编码工具，每台机器的配置和 API Key 各不一样。如果要换一个模型、切一个中转站、或者批量更新一批机器的 Key，就得一台一台 SSH 上去改配置。
+团队里每个人、每台开发机上都有 Codex / Claude / Gemini / OpenCode / Pi 这些 AI 编码工具，每台机器的配置和 API Key 各不一样。如果要换一个模型、切一个中转站、或者批量更新一批机器的 Key，就得一台一台 SSH 上去改配置。
 
 AI Console 解决的就是这个问题：一台控制台 + 每台开发机一个轻量 Agent → Web 界面统一管理所有机器上这些工具的配置、凭据和模型配置下发。
 
-Every developer and every machine in a team runs AI coding tools like Codex, Claude, Gemini, or OpenCode — each with its own config and API keys. Changing a model, switching a relay, or rotating keys means SSH-ing into each machine one by one.
+Every developer and every machine in a team runs AI coding tools like Codex, Claude, Gemini, OpenCode, or Pi — each with its own config and API keys. Changing a model, switching a relay, or rotating keys means SSH-ing into each machine one by one.
 
 AI Console solves this: deploy one console + install a lightweight agent on each dev machine → manage all CLI tool configs, credentials, and model configuration rollout from a single web dashboard. No SSH required.
 
@@ -24,7 +24,7 @@ AI Console solves this: deploy one console + install a lightweight agent on each
 | 凭据安全下发 | Push API keys to target machines (AES-256-GCM encrypted) |
 | 供应商与模型管理 | Centralize API providers, keys, and model catalogs |
 | 批量操作 | Apply config changes to multiple servers with dry-run preview |
-| OpenCode 多渠道下发 | Deploy multiple provider keys into one opencode.json for easy switching |
+| OpenCode / Pi 多渠道下发 | Deploy multiple provider keys into one opencode.json or pi models.json for easy switching |
 | 供应商默认模型 | Set a default model per provider, auto-selected in config generation |
 | 操作审计 | Full audit trail with request ID correlation |
 
@@ -40,7 +40,8 @@ AI Console solves this: deploy one console + install a lightweight agent on each
                 Agent@开发机1   Agent@开发机2   Agent@macOS
                      │              │              │
             Codex/Claude/     Codex/Claude/     Codex/Claude/
-            Gemini/OpenCode   Gemini/OpenCode   Gemini/OpenCode
+            Gemini/OpenCode/  Gemini/OpenCode/  Gemini/OpenCode/
+            Pi                Pi                Pi
 ```
 
 - **控制台 / Console**：Node.js + TypeScript + Fastify，React SPA 前端，SQLite 数据库
@@ -89,6 +90,7 @@ Installs as a systemd (Linux) or launchd (macOS) service with auto-reconnect.
 | Claude Code | `~/.claude/settings.json` | `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` |
 | Gemini CLI | `~/.gemini/settings.json` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | OpenCode | `~/.config/opencode/opencode.json` | provider `apiKey` / `baseURL` |
+| Pi | `~/.pi/agent/models.json` | provider `apiKey` / `baseURL` (inline in config) |
 
 ## Agent 支持的操作 / Agent Actions
 
