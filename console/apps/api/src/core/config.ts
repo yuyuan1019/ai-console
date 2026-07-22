@@ -1,4 +1,5 @@
 import { DatabaseSync } from "node:sqlite"
+import crypto from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -204,7 +205,12 @@ export function generateConfig(tool: string, opts: {
   const providerLabel = opts.provider_name || "provider"
   const groupLabel = opts.group_name ? `_${opts.group_name}` : ""
   const rawId = `${providerLabel}${groupLabel}`
-  const providerId = rawId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
+  // ponytail: 纯非 ASCII 名（如中文「深度求索」）slug 化后为空，原兜底 "provider" 会让
+  // 所有中文名供应商在 opencode.json / pi models.json 里撞成同一个 key（bug 8 的变体）。
+  // 改为用名字的稳定短哈希：同输入→同输出（保留「按 name+group 派生」的设计，重导入仍稳定），
+  // 不同中文名得到不同 id；mergeOpenCode/mergePi 的去重仍兑底极端哈希碰撞。ASCII 名保持原可读 slug。
+  const slug = rawId.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")
+  const providerId = slug || `p-${crypto.createHash("sha256").update(rawId).digest("hex").slice(0, 8)}`
   let raw: any = null
   if (opts.raw_config_json) {
     try { raw = JSON.parse(opts.raw_config_json) } catch { raw = null }

@@ -175,7 +175,17 @@ export function ProvidersPage() {
 
           {/* 常用供应商预设：点选后自动填 name/baseUrl/family/apiFormat，仅需补 API Key */}
           <div className="space-y-1.5">
-            <div className="text-xs text-muted-foreground">常用供应商（点选自动填充）</div>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">常用供应商</span>
+              <button
+                type="button"
+                onClick={() => setSelectedPresetKey(null)}
+                className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] transition-colors ${selectedPresetKey === null ? "border-primary bg-primary/10 text-primary" : "border-border bg-background hover:bg-accent"}`}
+              >
+                自定义
+              </button>
+              <span className="text-[11px] text-muted-foreground/70">点选预设自动填充</span>
+            </div>
             {(["国外", "国内"] as const).map((region) => (
               <div key={region} className="flex flex-wrap items-center gap-1.5">
                 <span className="mr-1 text-[11px] text-muted-foreground/70">{region}</span>
@@ -215,12 +225,11 @@ export function ProvidersPage() {
             <Input className="min-w-56 flex-1" placeholder="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} disabled={pending} />
             <Input
               className="min-w-56 flex-1"
-              type="password"
+              type="text"
               placeholder={selectedPreset ? "API Key（填写后自动创建并保存）" : "API Key（可选，留空仅建供应商）"}
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               disabled={pending}
-              autoComplete="off"
             />
             <Input className="w-32" placeholder="标签" value={label} onChange={(e) => setLabel(e.target.value)} disabled={pending} />
             <Button type="submit" size="sm" disabled={pending}>
