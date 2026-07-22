@@ -1,10 +1,11 @@
 import { useMemo, useState, type FormEvent } from "react"
 import { Link } from "react-router-dom"
-import { ChevronRight, Key, Loader2, Plus, Trash2, Upload, X, AlertTriangle, CheckCircle, RotateCcw, History } from "lucide-react"
+import { ChevronRight, ExternalLink, Key, Loader2, Plus, Trash2, Upload, X, AlertTriangle, CheckCircle, RotateCcw, History, Zap } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { useCreateProvider, useDeleteProvider, useImportCcSwitch, useImportJobs, useProviders, useRollbackImport } from "@/hooks/useProviders"
+import { useCreateProvider, useDeleteProvider, useImportCcSwitch, useImportJobs, useProviders, useQuickAddProvider, useRollbackImport } from "@/hooks/useProviders"
+import { PROVIDER_PRESETS } from "@/lib/providerPresets"
 import type { ImportJobItem } from "@/lib/api"
 
 const TABS: { key: string; label: string; color: string }[] = [
@@ -22,6 +23,7 @@ function providerFamilies(p: { families: string[] }): string[] {
 export function ProvidersPage() {
   const { data, isLoading } = useProviders()
   const createProvider = useCreateProvider()
+  const quickAdd = useQuickAddProvider()
   const deleteProvider = useDeleteProvider()
   const importCcSwitch = useImportCcSwitch()
   const importJobs = useImportJobs()
@@ -31,6 +33,9 @@ export function ProvidersPage() {
   const [showHistory, setShowHistory] = useState(false)
   const [name, setName] = useState("")
   const [baseUrl, setBaseUrl] = useState("")
+  const [apiKey, setApiKey] = useState("")
+  const [label, setLabel] = useState("")
+  const [selectedPresetKey, setSelectedPresetKey] = useState<string | null>(null)
   const [error, setError] = useState("")
   const [importMsg, setImportMsg] = useState("")
   const [importWarnings, setImportWarnings] = useState<string[]>([])
@@ -52,13 +57,48 @@ export function ProvidersPage() {
     return data.filter((p) => providerFamilies(p).includes(tab))
   }, [data, tab])
 
+  const selectedPreset = useMemo(
+    () => PROVIDER_PRESETS.find((p) => p.key === selectedPresetKey) ?? null,
+    [selectedPresetKey]
+  )
+  const pending = createProvider.isPending || quickAdd.isPending
+
   async function onCreate(e: FormEvent) {
     e.preventDefault()
     setError("")
+    // 未选预设时退回 codex/openai-compat 默认；选了预设则用预设的 family/apiFormat/modelsEndpoint
+    const fam = selectedPreset?.family ?? "codex"
+    const apiFmt = selectedPreset?.apiFormat ?? null
+    const modelsEp = selectedPreset?.modelsEndpoint ?? "/v1/models"
+    const presetKey = selectedPreset?.key ?? "custom"
     try {
-      await createProvider.mutateAsync({ name, base_url: baseUrl || null, models_endpoint: "/v1/models", preset: "custom", enabled: true })
+      if (apiKey.trim()) {
+        // 填了 key：一步创建 provider + 加密保存 key（预设常用场景）
+        await quickAdd.mutateAsync({
+          name,
+          base_url: baseUrl,
+          models_endpoint: modelsEp,
+          preset: presetKey,
+          family: fam,
+          api_format: apiFmt,
+          api_key: apiKey.trim(),
+          label: label.trim() || "默认",
+        })
+      } else {
+        // 没填 key：仅建供应商（原行为）
+        await createProvider.mutateAsync({
+          name,
+          base_url: baseUrl || null,
+          models_endpoint: modelsEp,
+          preset: presetKey,
+          enabled: true,
+        })
+      }
       setName("")
       setBaseUrl("")
+      setApiKey("")
+      setLabel("")
+      setSelectedPresetKey(null)
       setShowAdd(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : "新增失败")
@@ -127,17 +167,65 @@ export function ProvidersPage() {
       </div>
 
       {showAdd && (
-        <div className="rounded-lg border border-border bg-card p-4">
-          <div className="mb-3 flex items-center justify-between">
+        <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+          <div className="flex items-center justify-between">
             <span className="text-sm font-medium">新增供应商</span>
             <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setShowAdd(false)}><X className="h-4 w-4" /></Button>
           </div>
-          <form className="flex flex-wrap gap-2" onSubmit={onCreate}>
-            <Input className="w-40" placeholder="名称" value={name} onChange={(e) => setName(e.target.value)} disabled={createProvider.isPending} required />
-            <Input className="min-w-48 flex-1" placeholder="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} disabled={createProvider.isPending} />
-            <Button type="submit" size="sm" disabled={createProvider.isPending}>
-              {createProvider.isPending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Plus className="mr-1 h-4 w-4" />}
-              添加
+
+          {/* 常用供应商预设：点选后自动填 name/baseUrl/family/apiFormat，仅需补 API Key */}
+          <div className="space-y-1.5">
+            <div className="text-xs text-muted-foreground">常用供应商（点选自动填充）</div>
+            {(["国外", "国内"] as const).map((region) => (
+              <div key={region} className="flex flex-wrap items-center gap-1.5">
+                <span className="mr-1 text-[11px] text-muted-foreground/70">{region}</span>
+                {PROVIDER_PRESETS.filter((p) => p.region === region).map((p) => (
+                  <button
+                    key={p.key}
+                    type="button"
+                    title={p.description}
+                    onClick={() => {
+                      setSelectedPresetKey(p.key)
+                      setBaseUrl(p.baseUrl)
+                      setName((prev) => (!prev || PROVIDER_PRESETS.some((x) => x.name === prev) ? p.name : prev))
+                    }}
+                    className={`inline-flex items-center rounded-md border px-2 py-1 text-xs transition-colors ${
+                      selectedPresetKey === p.key ? "border-primary bg-primary/10 text-primary" : "border-border bg-background hover:bg-accent"
+                    }`}
+                  >
+                    {p.name}
+                  </button>
+                ))}
+              </div>
+            ))}
+          </div>
+
+          {selectedPreset && (
+            <div className="flex items-center gap-2 rounded-md bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
+              <Zap className="h-3.5 w-3.5 shrink-0 text-amber-500" />
+              <span className="truncate">{selectedPreset.description}</span>
+              <a href={selectedPreset.docsUrl} target="_blank" rel="noreferrer" className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-primary hover:underline">
+                申请 Key <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+          )}
+
+          <form className="flex flex-wrap items-center gap-2" onSubmit={onCreate}>
+            <Input className="w-44" placeholder="名称" value={name} onChange={(e) => setName(e.target.value)} disabled={pending} required />
+            <Input className="min-w-56 flex-1" placeholder="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} disabled={pending} />
+            <Input
+              className="min-w-56 flex-1"
+              type="password"
+              placeholder={selectedPreset ? "API Key（填写后自动创建并保存）" : "API Key（可选，留空仅建供应商）"}
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              disabled={pending}
+              autoComplete="off"
+            />
+            <Input className="w-32" placeholder="标签" value={label} onChange={(e) => setLabel(e.target.value)} disabled={pending} />
+            <Button type="submit" size="sm" disabled={pending}>
+              {pending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Plus className="mr-1 h-4 w-4" />}
+              {apiKey.trim() ? "添加并保存 Key" : "添加"}
             </Button>
           </form>
         </div>

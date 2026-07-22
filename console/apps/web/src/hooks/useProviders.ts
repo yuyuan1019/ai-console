@@ -52,6 +52,42 @@ export function useCreateProvider() {
   })
 }
 
+/** 快捷添加：一步创建 provider + key（用于预设常用供应商，填个 API key 就能用） */
+export function useQuickAddProvider() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async (input: {
+      name: string
+      base_url: string
+      models_endpoint: string
+      preset: string
+      family: string
+      api_format: string | null
+      api_key: string
+      label: string
+    }) => {
+      const provider = await api.createProvider({
+        name: input.name,
+        base_url: input.base_url || null,
+        models_endpoint: input.models_endpoint,
+        preset: input.preset,
+        enabled: true,
+      })
+      await api.createProviderKey(provider.id, {
+        label: input.label,
+        api_key: input.api_key,
+        family: input.family,
+        api_format: input.api_format,
+      })
+      return provider
+    },
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["providers"] })
+      void queryClient.invalidateQueries({ queryKey: ["models"] })
+    },
+  })
+}
+
 export function useImportCcSwitch() {
   const queryClient = useQueryClient()
   return useMutation({
