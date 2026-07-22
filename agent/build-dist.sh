@@ -30,6 +30,18 @@ resolve_version() {
     echo "$AGENT_VERSION"
     return
   fi
+  # ponytail: VERSION file is the canonical source — a one-line bump committed
+  # to the repo. Docker builds (Dockerfile) and `git pull && build` both pick
+  # it up with no --build-arg / env / git-tags needed. Kept below the explicit
+  # arg/env so CI/one-offs can still override.
+  local vf="$(dirname "${BASH_SOURCE[0]}")/VERSION"
+  if [ -f "$vf" ]; then
+    local v; v="$(tr -d '[:space:]' < "$vf")"
+    if [ -n "$v" ]; then
+      echo "$v"
+      return
+    fi
+  fi
   if command -v git >/dev/null 2>&1 && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1; then
     local d
     if d="$(git -C "$ROOT" describe --tags --dirty --always 2>/dev/null)"; then
@@ -37,7 +49,7 @@ resolve_version() {
       return
     fi
   fi
-  echo "error: version is required — pass \"$0 vX.Y.Z\" or set AGENT_VERSION" >&2
+  echo "error: version is required — set agent/VERSION, pass \"$0 vX.Y.Z\", or set AGENT_VERSION" >&2
   exit 1
 }
 

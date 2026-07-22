@@ -12,14 +12,15 @@
 #     revision must get the same agent version embedded in the image.
 #
 # Build context must include both agent/ and console/. Build from repo root:
-#   docker build -t ai-console:v2.0.0 --build-arg AGENT_VERSION=v2.0.0 .
+#   docker build -t ai-console .        # version read from agent/VERSION
 
 # ===== Stage 1: Go builder =====
 FROM golang:1.23-bookworm AS agent-builder
 
 # build-dist.sh uses python3 to compute sha256 + write manifest.json, and
-# git for version fallback (we pass AGENT_VERSION explicitly so git is
-# optional, but install it anyway to keep build-dist.sh happy on dirty trees).
+# reads the version from agent/VERSION (no build-arg). git is installed as a
+# fallback so local `build-dist.sh` outside Docker can still `git describe`
+# on dirty trees.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -33,17 +34,18 @@ RUN cd agent && go mod download
 # Source tree (cmd/ai-agent + internal/agent + build-dist.sh).
 COPY agent/ ./agent/
 
-ARG AGENT_VERSION=v2.0.0
-ENV AGENT_VERSION=${AGENT_VERSION}
-
 # build-dist.sh resolves ROOT to its parent dir (/src) and writes to
 # /src/console/agent-dist. It also runs go vet and the host-platform
 # `--version` stamp check; in a linux/amd64 container that verifies
 # ai-agent-linux-amd64, the other three platforms are cross-compiled only.
-RUN cd agent && bash build-dist.sh "${AGENT_VERSION}"
+# ponytail: version comes from agent/VERSION (committed) — no --build-arg
+# needed. Bump agent/VERSION, commit, and `docker compose up -d --build`
+# ships the new version automatically.
+RUN cd agent && bash build-dist.sh
 
-# Sanity: fail the build if manifest doesn't carry the requested version.
-RUN test "$(python3 -c 'import json;print(json.load(open("/src/console/agent-dist/manifest.json"))["version"])')" = "${AGENT_VERSION}"
+# Sanity: fail the build if the built manifest version diverges from the
+# VERSION file (catches a stale agent/VERSION vs source, or a botched build).
+RUN test "$(python3 -c 'import json;print(json.load(open("/src/console/agent-dist/manifest.json"))["version"])')" = "$(tr -d '[:space:]' < agent/VERSION)"
 
 # ===== Stage 2: Node runtime =====
 FROM node:24-bookworm-slim
