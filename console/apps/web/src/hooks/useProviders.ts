@@ -10,10 +10,10 @@ export function useImportJobs() {
   return useQuery({ queryKey: ["import-jobs"], queryFn: api.importJobs })
 }
 
-export function useProvider(id: string | undefined) {
+export function useProvider(id: string | undefined, keyId?: string) {
   return useQuery({
-    queryKey: ["provider", id],
-    queryFn: () => api.provider(id!),
+    queryKey: ["provider", id, keyId],
+    queryFn: () => api.provider(id!, keyId),
     enabled: !!id,
   })
 }

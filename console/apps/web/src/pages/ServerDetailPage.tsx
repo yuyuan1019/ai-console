@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react"
+import { useMemo, useState, useEffect, useRef } from "react"
 import { useParams, Link, useNavigate } from "react-router-dom"
 import { ArrowLeft, Loader2, Plus, Minus, Trash2, Key, Search, Copy, Check, PackageOpen, Pencil } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -7,7 +7,7 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useLatestConfig, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useUpdateServer } from "@/hooks/useServers"
-import { useProviders, useProvider } from "@/hooks/useProviders"
+import { useProviders, useProvider, useRefreshModels } from "@/hooks/useProviders"
 
 function formatTs(value: number | null) {
   return value ? new Date(value).toLocaleString() : "从未"
@@ -90,7 +90,26 @@ export function ServerDetailPage() {
   const [credProviderId, setCredProviderId] = useState("")
   const [credKeyId, setCredKeyId] = useState("")
   const { data: providers = [] } = useProviders()
-  const { data: credProviderDetail } = useProvider(credProviderId || undefined)
+  const { data: credProviderDetail } = useProvider(credProviderId || undefined, credKeyId || undefined)
+  const refreshModelsMut = useRefreshModels(credProviderId || undefined)
+  const refreshedCredKeyRef = useRef<string>("")
+
+  // ponytail: 与 BatchPage 一致——选了 key 但该 key 无模型时自动刷新一次。刷新后
+  // 仍为空/失败 → noCredModels=true，提醒并禁用「下发配置」（否则后端会 400
+  // "no model available"，这里前端先拦）。
+  useEffect(() => {
+    if (!credProviderId || !credKeyId) { refreshedCredKeyRef.current = ""; return }
+    if (refreshedCredKeyRef.current === credKeyId) return
+    if (credProviderDetail && credProviderDetail.models.length === 0 && !refreshModelsMut.isPending) {
+      refreshedCredKeyRef.current = credKeyId
+      refreshModelsMut.mutate(credKeyId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [credProviderId, credKeyId, credProviderDetail])
+
+  const isRefreshingCredModels = !!credProviderId && !!credKeyId && refreshModelsMut.isPending
+  const credRefreshDone = !!credKeyId && refreshedCredKeyRef.current === credKeyId && !refreshModelsMut.isPending
+  const noCredModels = credRefreshDone && (credProviderDetail?.models || []).length === 0
   const [showUninstall, setShowUninstall] = useState(false)
   const [uninstallCopied, setUninstallCopied] = useState(false)
   const [editingName, setEditingName] = useState(false)
@@ -405,7 +424,7 @@ export function ServerDetailPage() {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={setCredential.isPending || !credProviderId || !credKeyId}
+                    disabled={setCredential.isPending || !credProviderId || !credKeyId || noCredModels}
                     onClick={() => setCredential.mutate({ tool, provider_id: credProviderId, key_id: credKeyId })}
                   >
                     {setCredential.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Key className="mr-1 h-3 w-3" />}
@@ -464,6 +483,18 @@ export function ServerDetailPage() {
                     {credKeys.map((k) => <option key={k.id} value={k.id}>{k.label} ({k.family})</option>)}
                   </select>
                 </div>
+                {isRefreshingCredModels && (
+                  <p className="text-xs text-muted-foreground flex items-center gap-1">
+                    <Loader2 className="h-3 w-3 animate-spin" /> 正在为该 Key 拉取可用模型…
+                  </p>
+                )}
+                {noCredModels && (
+                  <p className="text-xs text-red-500">
+                    {refreshModelsMut.isError
+                      ? `该 Key 没有可用模型（刷新失败：${String((refreshModelsMut.error as any)?.message || refreshModelsMut.error || "")}），无法下发。`
+                      : "该 Key 没有可用模型（刷新后仍为空），无法下发。"}
+                  </p>
+                )}
                 {Object.keys(credKeyPreview).length > 0 && (
                   <div className="rounded bg-muted/50 p-2 text-xs">
                     <div className="mb-1 text-[10px] font-medium text-muted-foreground">即将写入</div>

@@ -48,7 +48,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
           const providerLabel = key.provider_name || "provider"
           const groupLabel = key.group_name ? `_${key.group_name}` : ""
           const providerId = `${providerLabel}${groupLabel}`.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "provider"
-          const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(ke.providerId) as any[]).map(r => r.model_id)
+          const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 AND (key_id=? OR key_id IS NULL) ORDER BY model_id").all(ke.providerId, ke.keyId) as any[]).map(r => r.model_id)
           entries.push({
             providerId, providerLabel,
             openAiBaseUrl: withOpenAiV1(baseUrl),
@@ -84,7 +84,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
       const secret = decrypt(key.encrypted_value, key.iv)
       if (!secret) return reply.code(400).send({ error: "decrypt failed" })
 
-      const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(providerId) as any[]).map(r => r.model_id)
+      const allModels = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 AND (key_id=? OR key_id IS NULL) ORDER BY model_id").all(providerId, keyId) as any[]).map(r => r.model_id)
 
       const result = generateConfig(tool, {
         base_url: key.base_url || "",

@@ -282,7 +282,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
     return after
   })
 
-  app.get<{ Params: { id: string } }>("/api/providers/:id", async (req, reply) => {
+  app.get<{ Params: { id: string }; Querystring: { key_id?: string } }>("/api/providers/:id", async (req, reply) => {
     const p = db
       .prepare(
         "SELECT id,name,base_url,models_endpoint,preset,enabled FROM providers WHERE id=?"
@@ -294,11 +294,20 @@ export function registerProvidersRoutes(app: FastifyInstance) {
         "SELECT id,label,group_name,family,api_format,auth_type,enabled,default_model_id FROM provider_keys WHERE provider_id=? AND enabled=1 ORDER BY label"
       )
       .all(req.params.id)
-    const models = db
-      .prepare(
-        "SELECT id,key_id,model_id,family,display_name,context_window,enabled FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id"
-      )
-      .all(req.params.id)
+    // ponytail: 可选 key_id 过滤——与 ping 一致，只返回该 key 刷新出的模型
+    // + key_id IS NULL 的通用模型（cc-switch 导入）。不传则返回全部（向后兼容）。
+    const keyFilter = req.query?.key_id ? String(req.query.key_id).trim() : ""
+    const models = keyFilter
+      ? db
+          .prepare(
+            "SELECT id,key_id,model_id,family,display_name,context_window,enabled FROM models WHERE provider_id=? AND enabled=1 AND (key_id=? OR key_id IS NULL) ORDER BY model_id"
+          )
+          .all(req.params.id, keyFilter)
+      : db
+          .prepare(
+            "SELECT id,key_id,model_id,family,display_name,context_window,enabled FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id"
+          )
+          .all(req.params.id)
     const endpoints = db
       .prepare("SELECT id,url FROM provider_endpoints WHERE provider_id=? ORDER BY id")
       .all(req.params.id)
@@ -609,8 +618,8 @@ export function registerProvidersRoutes(app: FastifyInstance) {
             .prepare("SELECT model_id FROM models WHERE provider_id=? AND (key_id=? OR key_id IS NULL) AND model_id=? AND enabled=1")
             .get(req.params.id, req.params.keyId, requestedModel) as any)
         : (db
-            .prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 LIMIT 1")
-            .get(req.params.id) as any)
+            .prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 AND (key_id=? OR key_id IS NULL) LIMIT 1")
+            .get(req.params.id, req.params.keyId) as any)
       if (requestedModel && !m) return reply.code(404).send({ error: "model not found for this key" })
 
       let autoFetched = false

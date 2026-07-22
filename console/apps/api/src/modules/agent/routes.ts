@@ -340,7 +340,7 @@ function materializeProviderRefs(payload: any): any {
     if (key.auth_type !== "apikey" || !key.encrypted_value) throw new Error("oauth key has no secret")
     const secret = decrypt(key.encrypted_value, key.iv)
     if (!secret) throw new Error("decrypt failed")
-    const models = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id").all(providerId) as any[]).map((r) => r.model_id)
+    const models = (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 AND (key_id=? OR key_id IS NULL) ORDER BY model_id").all(providerId, keyId) as any[]).map((r) => r.model_id)
     return { entry: e, key, secret, models, modelId, providerId, keyId }
   })
 

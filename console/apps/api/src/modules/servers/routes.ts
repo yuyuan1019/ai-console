@@ -257,7 +257,7 @@ export function registerServersRoutes(app: FastifyInstance) {
                   WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
         .get(keyId, providerId) as any
       const modelId = keyDetail?.default_model_id ||
-        (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 ORDER BY model_id LIMIT 1").get(providerId) as any)?.model_id
+        (db.prepare("SELECT model_id FROM models WHERE provider_id=? AND enabled=1 AND (key_id=? OR key_id IS NULL) ORDER BY model_id LIMIT 1").get(providerId, keyId) as any)?.model_id
       if (!modelId) return reply.code(400).send({ error: "no model available for this provider" })
 
       const writeConfigTask = createAgentTask(

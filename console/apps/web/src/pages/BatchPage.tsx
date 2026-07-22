@@ -1,9 +1,9 @@
-import { useState } from "react"
+import { useState, useEffect, useRef } from "react"
 import { CheckCircle2, ChevronRight, Loader2, Rocket, RotateCcw, XCircle, Eye, X, Plus } from "lucide-react"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { useServers } from "@/hooks/useServers"
-import { useProviders, useProvider } from "@/hooks/useProviders"
+import { useProviders, useProvider, useRefreshModels } from "@/hooks/useProviders"
 import { usePreviewConfig, useBatchExecute, useBatchStatus, useBatchRollback } from "@/hooks/useBatch"
 import type { ConfigPreview, KeyModelEntry } from "@/lib/api"
 import { cn } from "@/lib/utils"
@@ -29,7 +29,32 @@ export function BatchPage() {
 
   const { data: servers = [] } = useServers()
   const { data: providers = [] } = useProviders()
-  const { data: providerDetail } = useProvider(providerId || undefined)
+  const { data: providerDetail } = useProvider(providerId || undefined, keyId || undefined)
+  const refreshModelsMut = useRefreshModels(providerId || undefined)
+  const refreshedKeyRef = useRef<string>("")
+
+  // ponytail: 选了 key 但该 key 一个模型都没有时，自动调一次「刷新模型」拉取并
+  // 导入。用 ref 记录已刷新过的 key，避免 providerDetail 重取时重复打远端。
+  // 刷新后仍为空或接口报错 → noModels=true，UI 提醒并阻止继续（modelId 为空
+  // 天然让 canPreview / addKeyEntry 失效，无法预览或加入渠道）。
+  useEffect(() => {
+    if (!providerId || !keyId) { refreshedKeyRef.current = ""; return }
+    if (refreshedKeyRef.current === keyId) return
+    if (providerDetail && providerDetail.models.length === 0 && !refreshModelsMut.isPending) {
+      refreshedKeyRef.current = keyId
+      refreshModelsMut.mutate(keyId)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providerId, keyId, providerDetail])
+
+  const isRefreshingModels = !!providerId && !!keyId && refreshModelsMut.isPending
+  const refreshDone = !!keyId && refreshedKeyRef.current === keyId && !refreshModelsMut.isPending
+  const noModels = refreshDone && (providerDetail?.models || []).length === 0
+  const noModelsHint = noModels
+    ? refreshModelsMut.isError
+      ? `该 Key 没有可用模型（刷新失败：${String((refreshModelsMut.error as any)?.message || refreshModelsMut.error || "")}），请确认 Key 有效或供应商支持模型列表接口，无法继续下发。`
+      : "该 Key 没有可用模型（刷新后仍为空），请确认 Key 有效或供应商支持模型列表接口，无法继续下发。"
+    : ""
   const previewMut = usePreviewConfig()
   const executeMut = useBatchExecute()
   const { data: batchStatus } = useBatchStatus(batchId)
@@ -164,6 +189,7 @@ export function BatchPage() {
       {step === 2 && (
         <div className="space-y-4">
           {!multiKey && (
+            <>
             <div className="grid gap-3 md:grid-cols-3 max-w-2xl">
               <div className="space-y-1">
                 <span className="text-xs font-medium text-muted-foreground">供应商</span>
@@ -174,7 +200,7 @@ export function BatchPage() {
               </div>
               <div className="space-y-1">
                 <span className="text-xs font-medium text-muted-foreground">Key</span>
-                <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
+                <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setModelId(""); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
                   <option value="">选择 Key…</option>
                   {(providerDetail?.keys || []).filter((k) => k.enabled === 1).map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
                 </select>
@@ -187,6 +213,15 @@ export function BatchPage() {
                 </select>
               </div>
             </div>
+            {isRefreshingModels && (
+              <p className="max-w-2xl text-xs text-muted-foreground flex items-center gap-1">
+                <Loader2 className="h-3 w-3 animate-spin" /> 正在为该 Key 拉取可用模型…
+              </p>
+            )}
+            {noModels && (
+              <p className="max-w-2xl text-xs text-red-500">{noModelsHint}</p>
+            )}
+            </>
           )}
 
           {multiKeyTool && !multiKey && (
@@ -232,7 +267,7 @@ export function BatchPage() {
                       <option value="">供应商</option>
                       {providers.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                     </select>
-                    <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setPreview(null) }} className="h-9 w-40 rounded-md border border-input bg-background px-2 text-xs" disabled={!availableProviderKeys.length && !providerDetail}>
+                    <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setModelId(""); setPreview(null) }} className="h-9 w-40 rounded-md border border-input bg-background px-2 text-xs" disabled={!availableProviderKeys.length && !providerDetail}>
                       <option value="">Key</option>
                       {availableProviderKeys.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
                     </select>
@@ -244,6 +279,14 @@ export function BatchPage() {
                       <Plus className="mr-1 h-3.5 w-3.5" /> 添加
                     </Button>
                   </div>
+                  {isRefreshingModels && (
+                    <p className="text-xs text-muted-foreground flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" /> 正在为该 Key 拉取可用模型…
+                    </p>
+                  )}
+                  {noModels && (
+                    <p className="text-xs text-red-500">{noModelsHint}</p>
+                  )}
                 </div>
               )}
             </div>

@@ -411,7 +411,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify(input),
     }),
-  provider: (id: string) => request<ProviderDetail>(`/providers/${id}`),
+  provider: (id: string, keyId?: string) =>
+    request<ProviderDetail>(keyId ? `/providers/${id}?key_id=${encodeURIComponent(keyId)}` : `/providers/${id}`),
   updateProvider: (id: string, input: UpdateProviderInput) =>
     request<ProviderDetail>(`/providers/${id}`, {
       method: "PUT",
