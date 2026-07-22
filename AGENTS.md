@@ -23,7 +23,7 @@ cd console/apps/web && npm run build                   # tsc && vite build → d
 docker compose up -d
 
 # Agent binaries (cross-compile linux/darwin amd64/arm64 → console/agent-dist/ + manifest.json)
-cd agent && bash build-dist.sh vX.Y.Z   # cross-compile linux/darwin × amd64/arm64 → console/agent-dist/ + manifest.json (needs Go ≥1.23; GOPROXY=https://goproxy.cn,direct in CN)
+cd agent && bash build-dist.sh          # version auto-read from agent/VERSION (no arg); needs Go ≥1.23 (GOPROXY=https://goproxy.cn,direct in CN). See "Agent versioning & release" below.
 
 # DB seed/verify (manual, no npm script). Both are fragile — see gotchas.
 node console/db/seed.cjs        # wipes + rebuilds console/data/ai-console.db; needs seed/cc-switch-import.json (not in repo)
@@ -31,6 +31,42 @@ node console/db/verify.cjs      # decrypt round-trip check; hardcoded absolute p
 ```
 
 Migrations run automatically on every API boot (`runMigrations` in `core/db.ts`, called from `server.ts:34`).
+
+## Agent versioning & release
+
+The agent version has a **single source of truth: `agent/VERSION`** — one line, e.g. `v2.0.1`. It flows through three consumers with no `--build-arg` anywhere:
+
+1. **`agent/build-dist.sh`** — `resolve_version()` precedence:
+   1. explicit `vX.Y.Z` CLI arg (`bash build-dist.sh v2.0.2`) — CI / one-off overrides
+   2. `AGENT_VERSION` env var
+   3. **`agent/VERSION` file** ← the default for normal builds
+   4. `git describe --tags --dirty --always` (fallback for dirty trees outside Docker)
+   5. hard fail
+2. **`Dockerfile`** — stage 1 runs `bash build-dist.sh` with **no arg**, so the image is stamped from `agent/VERSION`. A sanity `RUN test` then fails the build if the produced `manifest.json` version ≠ `agent/VERSION` (catches a stale VERSION vs source). There is no `ARG AGENT_VERSION` anymore.
+3. **`console/agent-dist/manifest.json`** — the committed snapshot. The API serves it as "latest" via `/api/agent/manifest` + `/agent/manifest.json` (`routes.ts` `readAgentManifest`, read fresh from disk each request — not cached). For **Docker** deployments this committed file is ignored (the image rebuilds the agent from source); for **direct tsx** deployments it IS the live file, so it must stay in sync with `agent/VERSION`.
+
+### Bumping the version (dev machine)
+
+```bash
+echo "v2.0.2" > agent/VERSION          # 1. new version
+cd agent && bash build-dist.sh          # 2. rebuild → refreshes console/agent-dist/* + manifest.json
+git add agent/VERSION console/agent-dist # 3. commit VERSION + refreshed dist TOGETHER
+git commit -m "agent: v2.0.2 ..."
+git push
+```
+
+`agent/VERSION` and the rebuilt `console/agent-dist/` go in the **same commit** — otherwise the committed manifest drifts from VERSION and direct/tsx deployments serve a mismatched "latest".
+
+### Deploying (deploy machine — e.g. NAS behind DSM reverse proxy)
+
+```bash
+git pull
+docker compose up -d --build            # rebuild image: agent recompiled from source, stamped from VERSION
+```
+
+- `up -d --build` is **mandatory** — the image bakes API source + built SPA + Go-compiled agent binaries. `docker compose stop && start` (or `restart`) reuses the OLD image and picks up nothing.
+- No `--build-arg` — the version arrives via `git pull` → `agent/VERSION`.
+- After rebuild the console page **"最新"** (latest manifest) shows the new version. **"当前"** (per-agent `agent_version` in the `servers` table) updates only after each target agent is upgraded and heartbeats — that's a separate step.
 
 ## Architecture
 
@@ -125,7 +161,7 @@ React 19 + Vite + Tailwind 3 + shadcn-style UI (`components/ui/*`). State is spl
 
 ## Critical gotchas
 
-- **Agent build works.** `agent/cmd/ai-agent/main.go` is the `package main` entry (thin CLI wrapper over `internal/agent`). `bash build-dist.sh` cross-compiles linux/darwin × amd64/arm64, verifies `--version` on the host-runnable binary, and regenerates `console/agent-dist/manifest.json` (sha256+size). The 4 binaries + manifest are **tracked in git** — rebuild and commit them together with any agent code change. Needs Go ≥1.23 + network to fetch `gorilla/websocket` (`GOPROXY=https://goproxy.cn,direct` in CN; `proxy.golang.org` is unreachable). **Version source of truth is `agent/VERSION`** (one line, e.g. `v2.0.1`); `build-dist.sh` reads it automatically, the Dockerfile bakes it into the image, and an explicit `vX.Y.Z` arg / `AGENT_VERSION` env still override it.
+- **Agent build works.** `agent/cmd/ai-agent/main.go` is the `package main` entry (thin CLI wrapper over `internal/agent`). `bash build-dist.sh` cross-compiles linux/darwin × amd64/arm64, verifies `--version` on the host-runnable binary, and regenerates `console/agent-dist/manifest.json` (sha256+size). The 4 binaries + manifest are **tracked in git** — rebuild and commit them together with any agent code change. Needs Go ≥1.23 + network to fetch `gorilla/websocket` (`GOPROXY=https://goproxy.cn,direct` in CN; `proxy.golang.org` is unreachable). Version source / bump / deploy flow: see **Agent versioning & release** above.
 - **Deploying the Docker image picks up code only via rebuild, not restart.** The image bakes the API source, the built SPA, AND the Go-compiled agent binaries (manifest read fresh from disk at runtime, but the binaries/`routes.ts` are baked). So `git pull && docker compose stop && docker compose start` reuses the OLD image and changes nothing. The deploy cycle is `git pull && docker compose up -d --build` (rebuild + recreate). Version bumps need no `--build-arg` — `agent/VERSION` flows in via `git pull`.
 - **Reverse proxies (Synology DSM) strip the `Authorization` header.** The agent authenticates every WS/REST call with `Authorization: Bearer <agent_token>`. DSM reverse proxy (and some nginx WebSocket configs) drop that header before it reaches Node — symptoms: agent log shows `ws error: close 4001: missing agent token` + `rest poll: 401` while the WS dial itself succeeds. Since v2.0.1 the agent also mirrors the token into a custom `X-Agent-Token` header (unknown custom headers pass such proxies through untouched), and `agentTokenFromRequest` in `modules/agent/routes.ts` accepts either. **enroll is unaffected** — the one-time enroll token travels in the JSON body (`agent.go` Enroll → `routes.ts` `/agent/enroll` reads `req.body.token`), not a header. No proxy-side config change is needed.
 - **`MASTER_KEY` rotation is destructive.** `KEY = sha256(MASTER_KEY)`; changing it after data is encrypted makes all existing `provider_keys.encrypted_value` undecryptable (decrypt returns null). There is no re-encryption migration.
