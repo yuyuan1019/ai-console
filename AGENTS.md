@@ -23,7 +23,7 @@ cd console/apps/web && npm run build                   # tsc && vite build → d
 docker compose up -d
 
 # Agent binaries (cross-compile linux/darwin amd64/arm64 → console/agent-dist/ + manifest.json)
-cd agent && bash build-dist.sh [version]   # NOTE: currently fails — see "Agent build is broken" below
+cd agent && bash build-dist.sh vX.Y.Z   # cross-compile linux/darwin × amd64/arm64 → console/agent-dist/ + manifest.json (needs Go ≥1.23; GOPROXY=https://goproxy.cn,direct in CN)
 
 # DB seed/verify (manual, no npm script). Both are fragile — see gotchas.
 node console/db/seed.cjs        # wipes + rebuilds console/data/ai-console.db; needs seed/cc-switch-import.json (not in repo)
@@ -125,7 +125,8 @@ React 19 + Vite + Tailwind 3 + shadcn-style UI (`components/ui/*`). State is spl
 
 ## Critical gotchas
 
-- **Agent build is broken as-is.** `agent/internal/agent/agent.go` is `package agent` (a library) — there is no `main` package, no `func main()`, and no `agent/cmd/ai-agent/` directory that `build-dist.sh:16` builds. `build-dist.sh` and `install.sh`'s `--enroll-only` flag / `-X main.version` ldflag reference a missing `cmd/ai-agent/main.go`. The agent cannot be compiled or run until that main package is added. `go build ./...` from `agent/` compiles the library only and produces no binary.
+- **Agent build works.** `agent/cmd/ai-agent/main.go` is the `package main` entry (thin CLI wrapper over `internal/agent`). `bash build-dist.sh vX.Y.Z` cross-compiles linux/darwin × amd64/arm64, verifies `--version` on the host-runnable binary, and regenerates `console/agent-dist/manifest.json` (sha256+size). The 4 binaries + manifest are **tracked in git** — rebuild and commit them together with any agent code change. Needs Go ≥1.23 + network to fetch `gorilla/websocket` (`GOPROXY=https://goproxy.cn,direct` in CN; `proxy.golang.org` is unreachable).
+- **Reverse proxies (Synology DSM) strip the `Authorization` header.** The agent authenticates every WS/REST call with `Authorization: Bearer <agent_token>`. DSM reverse proxy (and some nginx WebSocket configs) drop that header before it reaches Node — symptoms: agent log shows `ws error: close 4001: missing agent token` + `rest poll: 401` while the WS dial itself succeeds. Since v2.0.1 the agent also mirrors the token into a custom `X-Agent-Token` header (unknown custom headers pass such proxies through untouched), and `agentTokenFromRequest` in `modules/agent/routes.ts` accepts either. **enroll is unaffected** — the one-time enroll token travels in the JSON body (`agent.go` Enroll → `routes.ts` `/agent/enroll` reads `req.body.token`), not a header. No proxy-side config change is needed.
 - **`MASTER_KEY` rotation is destructive.** `KEY = sha256(MASTER_KEY)`; changing it after data is encrypted makes all existing `provider_keys.encrypted_value` undecryptable (decrypt returns null). There is no re-encryption migration.
 - **`productionCheck` hard-exits** (`process.exit(1)`) when `NODE_ENV=production` if `MASTER_KEY` is the default, if `JWT_SECRET` is the derived default, or if `BOOTSTRAP_ADMIN_PASS==='admin'`. In dev the box boots wide-open with `admin`/`admin`.
 - **Rate limiting is effectively off** — `@fastify/rate-limit` is registered with `global:false, max:0`; nothing throttles login/enroll unless a route explicitly opts in.

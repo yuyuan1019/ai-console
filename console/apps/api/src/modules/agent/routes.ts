@@ -490,9 +490,24 @@ export function createAgentTask(
   return { id: inserted.id, action, payload_json: inserted.payload_json, status: pushed ? "running" : "pending" }
 }
 
+// ponytail (DSM): extract the long-lived agent token from either the
+// Authorization: Bearer header (preferred) or a custom X-Agent-Token header
+// (fallback). Reverse proxies like Synology DSM reverse proxy strip the
+// standard Authorization header before it reaches the backend; unknown
+// custom headers pass through untouched, so the agent sends both and we
+// accept either. Authorization is checked first to keep the original
+// security posture (no query-string token, see BUG-05).
+function agentTokenFromRequest(req: any): string {
+  const auth = String(req.headers?.authorization || "")
+  if (auth.toLowerCase().startsWith("bearer ")) {
+    const t = auth.slice(7).trim()
+    if (t) return t
+  }
+  return String(req.headers?.["x-agent-token"] || "").trim()
+}
+
 function agentServerFromRequest(req: any): { id: string } | null {
-  const auth = String(req.headers.authorization || "")
-  const token = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : ""
+  const token = agentTokenFromRequest(req)
   return token ? (db.prepare("SELECT id FROM servers WHERE agent_token_hash=?").get(hashToken(token)) as any) : null
 }
 
@@ -866,14 +881,16 @@ echo "Your CLI tools (codex/claude/gemini/opencode) and their configs are NOT to
       return
     }
 
-    // ponytail (BUG-05, 2.0): Agent WS auth via Authorization header only.
+    // ponytail (BUG-05, 2.0): Agent WS auth via request header only.
     // Legacy `?token=` query auth leaked the long-lived agent token into
     // reverse-proxy access logs. Agents in 2.0 must send the header (see
     // agent.go connectWS + Dialer{HTTPHeader}). No back-compat URL fallback.
-    const authHeader = String(req.headers?.authorization || "")
-    const bearer = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : ""
-    if (!bearer) return socket.close(4001, "missing agent token")
-    const server = db.prepare("SELECT id, agent_protocol_version FROM servers WHERE agent_token_hash=?").get(hashToken(bearer)) as any
+    // ponytail (DSM): Authorization is preferred, but some reverse proxies
+    // (Synology DSM) strip it — agentTokenFromRequest also accepts the
+    // X-Agent-Token fallback header. See agent.go (sends both).
+    const token = agentTokenFromRequest(req)
+    if (!token) return socket.close(4001, "missing agent token")
+    const server = db.prepare("SELECT id, agent_protocol_version FROM servers WHERE agent_token_hash=?").get(hashToken(token)) as any
     if (!server) return socket.close(4001, "invalid token")
     if (server.agent_protocol_version !== 2) return socket.close(4426, "agent protocol 2 required")
 

@@ -387,6 +387,12 @@ func (a *Agent) connectWS(ctx context.Context) error {
 	wsURL := fmt.Sprintf("%s://%s/agent/ws", scheme, u.Host)
 	header := http.Header{}
 	header.Set("Authorization", "Bearer "+a.agentTok)
+	// ponytail (DSM): some reverse proxies (Synology DSM reverse proxy) strip
+	// the standard Authorization header before it reaches the backend. Mirror
+	// the token into a custom X-Agent-Token header, which unknown custom
+	// headers pass through untouched. The server accepts either (see
+	// agentTokenFromRequest in routes.ts). Sent on every authed request below.
+	header.Set("X-Agent-Token", a.agentTok)
 
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
 	if err != nil {
@@ -499,6 +505,7 @@ func (a *Agent) pollRest(ctx context.Context) {
 
 	req, _ := http.NewRequestWithContext(ctx, "GET", a.cfg.Server+"/agent/tasks", nil)
 	req.Header.Set("Authorization", "Bearer "+a.agentTok)
+	req.Header.Set("X-Agent-Token", a.agentTok)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("rest poll error: %v", err)
@@ -552,6 +559,7 @@ func (a *Agent) restReport(ctx context.Context, taskID, nonce string, ok bool, r
 		bytes.NewReader(reportData))
 	req2.Header.Set("Content-Type", "application/json")
 	req2.Header.Set("Authorization", "Bearer "+a.agentTok)
+	req2.Header.Set("X-Agent-Token", a.agentTok)
 	r, err := http.DefaultClient.Do(req2)
 	if err != nil {
 		log.Printf("rest report error: %v", err)
@@ -574,6 +582,7 @@ func (a *Agent) restHeartbeat() {
 	req, _ := http.NewRequestWithContext(context.Background(), "POST", a.cfg.Server+"/agent/heartbeat", bytes.NewReader(data))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+a.agentTok)
+	req.Header.Set("X-Agent-Token", a.agentTok)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return
