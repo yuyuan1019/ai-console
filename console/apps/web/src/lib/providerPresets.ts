@@ -75,6 +75,28 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
     description: "聚合 300+ 模型",
     docsUrl: "https://openrouter.ai/keys",
   },
+  {
+    key: "opencode-zen",
+    name: "OpenCode Zen",
+    baseUrl: "https://opencode.ai/zen",
+    modelsEndpoint: "/v1/models",
+    family: "codex",
+    apiFormat: null,
+    region: "国外",
+    description: "Claude 等模型聚合网关（OpenAI 兼容）",
+    docsUrl: "https://opencode.ai/zen",
+  },
+  {
+    key: "opencode-go",
+    name: "OpenCode Go",
+    baseUrl: "https://opencode.ai/zen/go",
+    modelsEndpoint: "/v1/models",
+    family: "codex",
+    apiFormat: null,
+    region: "国外",
+    description: "Minimax / Kimi 等模型网关（OpenAI 兼容）",
+    docsUrl: "https://opencode.ai/zen/go",
+  },
 
   // ===== 国内 =====
   {
