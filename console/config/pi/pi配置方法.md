@@ -4,7 +4,9 @@
 
 Pi 是 earendil-works 的终端编码 agent（`@earendil-works/pi-coding-agent`）。自定义供应商与模型通过 `models.json` 声明，支持 OpenAI / Anthropic / Google 四种 API 协议；API Key 直接内联在 provider 块里（与 opencode 同构，无独立凭据文件）。
 
-> 本文件是 AI Console **下发实现**的说明。Pi 官方完整字段（cost / thinkingLevelMap / compat 等）见 pi 文档 `docs/models.md` 与 `docs/custom-provider.md`。AI Console 当前只下发 `baseUrl` / `api` / `apiKey` / `models[].{id,name}` 最小子集，保证即写即用。
+> 本文件是 AI Console **下发实现**的说明。Pi 官方完整字段（cost / thinkingLevelMap / compat 等）见 pi 文档 `docs/models.md` 与 `docs/custom-provider.md`。
+>
+> AI Console 下发字段：`baseUrl` / `api` / `apiKey` / `models[]`。除 `id`/`name` 外，**思考等级（reasoning）自动推断**：`core/thinking.ts` 的 `matchThinkingProfile` 按 model id 启发式判断模型是否支持思考（规律提炼自 pi-ai 1098 模型库，召回 ~88% / 精确 ~99%），支持则自动补 `models[].reasoning=true`；adaptive Claude（opus-4.6+/sonnet-5/fable）在 `api=anthropic-messages` 时额外补 `compat.forceAdaptiveThinking=true`。保守策略：不设 `thinkingLevelMap`，pi 暴露 `off..high`（xhigh/max 隐藏，多数中转不支持）。匹配不到的模型不下发 reasoning，pi 按默认 `false` 处理（思考不显示，安全降级）。
 
 ## 下发通道
 

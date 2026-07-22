@@ -113,7 +113,7 @@ This spans four files; changing delivery means touching all of them:
 
 | File | Role |
 |---|---|
-| `core/config.ts` | `generateConfig(tool,…)` / `buildOpenCodeConfig` / `mergeOpenCodeConfig` / `withOpenAiV1` — server-side config-string generation. (Misnamed: also holds cc-switch import parsers, not app config.) |
+| `core/config.ts` | `generateConfig(tool,…)` / `buildOpenCodeConfig` / `mergeOpenCodeConfig` / `withOpenAiV1` — server-side config-string generation. (Misnamed: also holds cc-switch import parsers, not app config.) `core/thinking.ts` (`matchThinkingProfile`) auto-infers per-model reasoning-effort support, consumed by the config builders. |
 | `modules/servers/routes.ts`, `modules/batch/routes.ts` | Delivery entrypoints (single-server `/api/servers/:id/credentials/set`; batch `/api/batch/{preview,execute}`). |
 | `modules/agent/routes.ts` | `materializeTaskPayload` — per-tool credential env-key maps; opencode no-op. |
 | `agent/internal/agent/agent.go` | On-host executor: `toolConfigPath()`, `handleSetCred`, `handleWriteConfig`, backup/restore. |
@@ -143,7 +143,18 @@ Per-tool reality:
 - Scrub on remove overwrites `models.json` with `{ "providers": {} }`.
 Full pi field documentation lives in the pi package's `docs/models.md` and `docs/custom-provider.md`; the `console/config/pi/pi配置方法.md` spec describes the AI Console delivery subset.
 
-The `console/config/<tool>/*.md` spec files are the human source of truth but are a **simplified description**, not the literal implementation — e.g. they say env vars go in `~/.bashrc`, but the agent actually writes `creds/<tool>.sh` and sources it; the opencode sample shows rich per-model objects, but `buildOpenCodeConfig` writes each model as `{}`.
+### Reasoning effort (thinking levels) — auto-inferred
+
+`core/thinking.ts` (`matchThinkingProfile`) infers whether a model supports extended thinking from its id via heuristic regex rules distilled from pi-ai's 1098-model builtin catalog (regression: ~88% recall / ~99% precision; mainstream gpt/claude/gemini/deepseek/kimi/qwen/glm/grok fully covered). On config generation this is written automatically — **path A: fully automatic, no DB/UI changes**:
+- **pi**: `models[].reasoning = true`; adaptive Claude (opus-4.6+/sonnet-5/fable) additionally gets `compat.forceAdaptiveThinking = true`, but **only when `api=anthropic-messages`** (other protocols would 400).
+- **opencode**: `models.<id> = { reasoning: true }` for capable models, `{}` otherwise.
+- **codex**: `model_reasoning_effort = "medium"` added to `config.toml` (only the no-`raw_config_json` branch; imported configs preserved as-is).
+- **claude**: `settings.effortLevel = "medium"` if not already set.
+- **gemini**: no standard thinking-level config field in Gemini CLI — skipped.
+
+Conservative by design: only `reasoning:true` is set, never `thinkingLevelMap` → pi/opencode expose `off..high` (xhigh/max hidden, since most relays reject them). To unlock full levels or override per model, that's path B (per-model editable config in the `models` table — not yet implemented).
+
+The `console/config/<tool>/*.md` spec files are the human source of truth but are a **simplified description**, not the literal implementation — e.g. they say env vars go in `~/.bashrc`, but the agent actually writes `creds/<tool>.sh` and sources it; the opencode sample shows rich per-model objects, but `buildOpenCodeConfig` writes each model as `{}` (or `{reasoning:true}` for reasoning-capable models — see "Reasoning effort" below).
 
 ### Crypto & auth
 

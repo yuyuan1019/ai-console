@@ -3,6 +3,7 @@ import crypto from "node:crypto"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
+import { matchThinkingProfile } from "./thinking"
 
 export function inferFamily(modelId: string, fallback: string | null): string {
   const id = modelId.toLowerCase()
@@ -223,6 +224,9 @@ export function generateConfig(tool: string, opts: {
     env["ANTHROPIC_MODEL"] = model
     const settings: any = { ...raw }
     settings.env = env
+    // ponytail: 全自动思考等级（路径 A）。effortLevel 持久化思考强度，只对支持 effort
+    // 的 Claude 模型生效（Claude Code 文档），对不支持的忽略，故对所有 claude key 安全。
+    if (!settings.effortLevel) settings.effortLevel = "medium"
     return { content: JSON.stringify(settings, null, 2), format: "json" }
   }
 
@@ -264,6 +268,7 @@ export function generateConfig(tool: string, opts: {
     }
     const toml = [
       `model = "${model}"`,
+      `model_reasoning_effort = "medium"`,
       `model_provider = "${providerId}"`,
       ``,
       `[model_providers.${providerId}]`,
@@ -315,7 +320,11 @@ export function buildOpenCodeConfig(entry: {
   if (!config.provider) config.provider = {}
   const modelList = entry.models && entry.models.length > 0 ? entry.models : [entry.model]
   const models: Record<string, any> = {}
-  for (const m of modelList) models[m] = {}
+  for (const m of modelList) {
+    // ponytail: 全自动思考等级（路径 A）。opencode schema 确认 model 对象有 reasoning 字段。
+    const p = matchThinkingProfile(m, inferFamily(m, null), entry.apiFormat)
+    models[m] = p?.reasoning ? { reasoning: true } : {}
+  }
   config.provider[entry.providerId] = {
     api,
     options: { baseURL: entry.openAiBaseUrl, apiKey: entry.apiKey },
@@ -394,7 +403,19 @@ export function buildPiConfig(entry: {
   const config: any = entry.raw && typeof entry.raw === "object" ? { ...entry.raw } : {}
   if (!config.providers) config.providers = {}
   const modelList = entry.models && entry.models.length > 0 ? entry.models : [entry.model]
-  const models = modelList.map((id) => ({ id, name: id }))
+  // ponytail: 全自动思考等级（路径 A）。按 model id 启发式推断 reasoning 能力。
+  // adaptive Claude 仅在 anthropic-messages 协议下加 compat.forceAdaptiveThinking
+  // （其他协议下 pi 不会发 adaptive payload，加了反而出错）。
+  const isAnthropic = api === "anthropic-messages"
+  const models = modelList.map((id) => {
+    const m: any = { id, name: id }
+    const p = matchThinkingProfile(id, inferFamily(id, null), entry.apiFormat)
+    if (p?.reasoning) {
+      m.reasoning = true
+      if (p.needsAdaptive && isAnthropic) m.compat = { forceAdaptiveThinking: true }
+    }
+    return m
+  })
   config.providers[entry.providerId] = {
     baseUrl: finalBaseUrl,
     api,
