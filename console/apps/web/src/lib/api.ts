@@ -184,6 +184,11 @@ export interface ServerTool {
   detected_at: number | null
 }
 
+export interface LatestToolVersions {
+  versions: Record<string, string | null>
+  checked_at: number
+}
+
 export interface ServerItem {
   id: string
   name: string
@@ -360,6 +365,7 @@ export const api = {
   logout: () => request<{ ok: true }>("/auth/logout", { method: "POST", body: JSON.stringify({}) }),
   servers: () => request<ServerItem[]>("/servers"),
   server: (id: string) => request<ServerDetail>(`/servers/${id}`),
+  latestToolVersions: () => request<LatestToolVersions>("/tools/latest"),
   updateServer: (id: string, input: { name: string }) =>
     request<{ ok: true; id: string; name: string }>(`/servers/${id}`, {
       method: "PATCH",
@@ -373,7 +379,7 @@ export const api = {
       body: JSON.stringify({ tool }),
     }),
   getLatestConfig: (id: string, tool: string) =>
-    request<LatestConfigResponse>(`/servers/${id}/configs/latest?tool=${encodeURIComponent(tool)}`),
+    request<LatestConfigResponse | null>(`/servers/${id}/configs/latest?tool=${encodeURIComponent(tool)}`),
   writeServerConfig: (id: string, input: { tool: string; format: string; content: string }) =>
     request<AgentTask>(`/servers/${id}/configs/write`, {
       method: "POST",

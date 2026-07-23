@@ -6,11 +6,34 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useLatestConfig, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useManageTool, useUpdateServer } from "@/hooks/useServers"
+import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useLatestConfig, useLatestToolVersions, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useManageTool, useUpdateServer } from "@/hooks/useServers"
 import { useProviders, useProvider, useRefreshModels } from "@/hooks/useProviders"
 
 function formatTs(value: number | null) {
   return value ? new Date(value).toLocaleString() : "从未"
+}
+
+function parseSemver(value: string | null | undefined) {
+  const match = String(value || "").match(/(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?/)
+  if (!match) return null
+  return {
+    parts: [Number(match[1]), Number(match[2]), Number(match[3])] as const,
+    prerelease: match[4] || null,
+  }
+}
+
+function compareVersions(latest: string | null | undefined, installed: string | null | undefined): number | null {
+  const next = parseSemver(latest)
+  const current = parseSemver(installed)
+  if (!next || !current) return null
+  for (let i = 0; i < 3; i++) {
+    if (next.parts[i] !== current.parts[i]) return next.parts[i] > current.parts[i] ? 1 : -1
+  }
+  if (next.prerelease === current.prerelease) return 0
+  if (!next.prerelease) return 1
+  if (!current.prerelease) return -1
+  const prereleaseOrder = next.prerelease.localeCompare(current.prerelease, undefined, { numeric: true })
+  return prereleaseOrder === 0 ? 0 : prereleaseOrder > 0 ? 1 : -1
 }
 
 type DiffLine = { type: "same" | "added" | "removed"; line: string }
@@ -68,6 +91,7 @@ export function ServerDetailPage() {
   const navigate = useNavigate()
   const { data: server, isLoading } = useServer(id)
   const { data: agentManifest } = useAgentManifest()
+  const { data: latestToolVersions } = useLatestToolVersions()
   const { data: tasks = [] } = useServerTasks(id)
   const readConfig = useReadServerConfig(id)
   const writeConfig = useWriteServerConfig(id)
@@ -119,7 +143,10 @@ export function ServerDetailPage() {
   const [loadedTool, setLoadedTool] = useState(tool)
   const [activeTab, setActiveTab] = useState("overview")
 
-  const latestConfigQuery = useLatestConfig(id, tool)
+  // Config snapshots do not exist until the first read_config completes.
+  // Fetch only while this tab is visible and render that case as an empty
+  // state rather than a failed request.
+  const latestConfigQuery = useLatestConfig(id, tool, activeTab === "configs")
   const latestReadContent = latestConfigQuery.data?.content || ""
 
   useEffect(() => {
@@ -163,6 +190,7 @@ export function ServerDetailPage() {
     if (tool === "gemini") return p.families.includes("gemini")
     if (tool === "opencode") return true
     if (tool === "pi") return true
+    if (tool === "hermes") return true
     return false
   })
   const credKeys = (credProviderDetail?.keys || []).filter((k) => k.enabled === 1)
@@ -199,6 +227,10 @@ export function ServerDetailPage() {
       const modelId = k.default_model_id || credProviderDetail?.models[0]?.model_id || "—"
       return { "配置文件": "~/.pi/agent/models.json", "使用模型": modelId }
     }
+    if (tool === "hermes") {
+      const modelId = k.default_model_id || credProviderDetail?.models[0]?.model_id || "—"
+      return { "配置文件": "~/.hermes/config.yaml", "使用模型": modelId }
+    }
     return {}
   }, [tool, credKeyId, credKeys, credProviderDetail])
 
@@ -209,7 +241,7 @@ export function ServerDetailPage() {
       ? `写入 ${tool} 配置到 ${server?.name}？将新增 ${stats.added} 行，删除 ${stats.removed} 行。agent 会先在目标机器本地备份原文件。`
       : `写入 ${tool} 配置到 ${server?.name}？agent 会先在目标机器本地备份原文件。`
     if (confirm(msg)) {
-      writeConfig.mutate({ tool, format: tool === "codex" ? "toml" : "json", content })
+      writeConfig.mutate({ tool, format: tool === "codex" ? "toml" : tool === "hermes" ? "yaml" : "json", content })
     }
   }
 
@@ -387,7 +419,7 @@ export function ServerDetailPage() {
                   disabled={upgradeAgent.isPending}
                   onClick={() => {
                     if (confirm(`升级 ${server.name} 上的 agent？会从本控制台下载最新二进制并自动重启服务。`)) {
-                      upgradeAgent.mutate(undefined, { onSuccess: () => setActiveTab("configs") })
+                      upgradeAgent.mutate()
                     }
                   }}
                 >
@@ -409,62 +441,76 @@ export function ServerDetailPage() {
                 </Button>
               </div>
               <div className="space-y-1 pt-2">
-                {server.tools.map((t) => (
-                  <div key={t.name} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-2 text-xs">
-                    <div>
-                      <div className="font-medium capitalize">{t.name} {t.installed ? "" : "（未安装）"}</div>
-                      <div className="text-muted-foreground">version: {t.version || "—"} · path: {t.path || "—"}</div>
-                    </div>
-                    <div className="flex items-center gap-1.5">
-                      {t.installed ? (
-                        <>
+                {server.tools.map((t) => {
+                  const latestVersion = latestToolVersions?.versions[t.name] || null
+                  const versionComparison = compareVersions(latestVersion, t.version)
+                  const canUpgrade = !!t.installed && versionComparison === 1
+                  const isCurrent = !!t.installed && versionComparison !== null && versionComparison <= 0
+                  return (
+                    <div key={t.name} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-2 text-xs">
+                      <div>
+                        <div className="flex items-center gap-1.5 font-medium capitalize">
+                          {t.name} {t.installed ? "" : "（未安装）"}
+                          {isCurrent && <Badge variant="outline" className="text-[10px]">已是最新</Badge>}
+                        </div>
+                        <div className="text-muted-foreground">
+                          version: {t.version || "—"}{latestVersion ? ` · latest: ${latestVersion}` : ""} · path: {t.path || "—"}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {t.installed ? (
+                          <>
+                            {canUpgrade && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                className="h-7 text-xs"
+                                disabled={manageTool.isPending}
+                                onClick={() => {
+                                  if (confirm(`升级 ${server.name} 上的 ${t.name}：${t.version || "未知"} → ${latestVersion}？`)) {
+                                    manageTool.mutate({ tool: t.name, action: "upgrade", version: latestVersion || undefined })
+                                  }
+                                }}
+                              >
+                                {manageTool.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PackageOpen className="mr-1 h-3 w-3" />}
+                                升级
+                              </Button>
+                            )}
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 text-xs text-destructive"
+                              disabled={manageTool.isPending}
+                              onClick={() => {
+                                const method = t.name === "hermes" ? "执行 Hermes 保留数据卸载" : "执行 npm uninstall --global"
+                                if (confirm(`卸载 ${server.name} 上的 ${t.name} CLI？将${method}；不会删除该工具的配置或已下发的凭据。`)) {
+                                  manageTool.mutate({ tool: t.name, action: "uninstall" })
+                                }
+                              }}
+                            >
+                              <Trash2 className="mr-1 h-3 w-3" /> 卸载
+                            </Button>
+                          </>
+                        ) : (
                           <Button
                             size="sm"
                             variant="outline"
                             className="h-7 text-xs"
                             disabled={manageTool.isPending}
                             onClick={() => {
-                              if (confirm(`升级 ${server.name} 上的 ${t.name}？将通过 npm 全局安装最新版本。`)) {
-                                manageTool.mutate({ tool: t.name, action: "upgrade" })
+                              if (confirm(`在 ${server.name} 上安装 ${t.name} CLI${latestVersion ? ` ${latestVersion}` : ""}？`)) {
+                                manageTool.mutate({ tool: t.name, action: "install", version: latestVersion || undefined })
                               }
                             }}
                           >
-                            {manageTool.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PackageOpen className="mr-1 h-3 w-3" />}
-                            升级
+                            {manageTool.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Plus className="mr-1 h-3 w-3" />}
+                            安装
                           </Button>
-                          <Button
-                            size="sm"
-                            variant="ghost"
-                            className="h-7 text-xs text-destructive"
-                            disabled={manageTool.isPending}
-                            onClick={() => {
-                              if (confirm(`卸载 ${server.name} 上的 ${t.name} CLI？将执行 npm uninstall --global；不会删除该工具的配置或已下发的凭据。`)) {
-                                manageTool.mutate({ tool: t.name, action: "uninstall" })
-                              }
-                            }}
-                          >
-                            <Trash2 className="mr-1 h-3 w-3" /> 卸载
-                          </Button>
-                        </>
-                      ) : (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-xs"
-                          disabled={manageTool.isPending}
-                          onClick={() => {
-                            if (confirm(`在 ${server.name} 上安装 ${t.name} CLI？将通过 npm 全局安装最新版本。`)) {
-                              manageTool.mutate({ tool: t.name, action: "install" })
-                            }
-                          }}
-                        >
-                          {manageTool.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Plus className="mr-1 h-3 w-3" />}
-                          安装
-                        </Button>
-                      )}
+                        )}
+                      </div>
                     </div>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
               <div className="rounded-md border border-border p-3 space-y-3">
                 <div className="flex items-center justify-between">
@@ -507,6 +553,7 @@ export function ServerDetailPage() {
                     <option value="gemini">gemini</option>
                     <option value="opencode">opencode</option>
                     <option value="pi">pi</option>
+                    <option value="hermes">hermes</option>
                   </select>
                 </div>
                 <div className="flex items-center gap-2">
@@ -602,6 +649,7 @@ export function ServerDetailPage() {
                   <option value="gemini">gemini</option>
                   <option value="opencode">opencode</option>
                   <option value="pi">pi</option>
+                  <option value="hermes">hermes</option>
                 </select>
                 <Button disabled={readConfig.isPending} onClick={() => readConfig.mutate(tool)}>
                   {readConfig.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
@@ -648,6 +696,9 @@ export function ServerDetailPage() {
               )}
               {latestConfigQuery.isLoading && (
                 <p className="text-xs text-muted-foreground">正在加载配置…</p>
+              )}
+              {latestConfigQuery.isSuccess && latestConfigQuery.data === null && (
+                <p className="text-xs text-muted-foreground">控制台尚无该工具的配置记录，请点击「读取配置」从目标机器载入，或直接粘贴内容。</p>
               )}
 
               <textarea

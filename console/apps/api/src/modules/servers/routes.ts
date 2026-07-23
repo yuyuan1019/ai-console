@@ -11,6 +11,57 @@ function serverTools(serverId: string) {
     .all(serverId)
 }
 
+const TOOL_NPM_PACKAGES: Record<string, string> = {
+  codex: "@openai/codex",
+  claude: "@anthropic-ai/claude-code",
+  gemini: "@google/gemini-cli",
+  opencode: "opencode-ai",
+  pi: "@earendil-works/pi-coding-agent",
+}
+
+let latestToolVersionsCache: { expiresAt: number; versions: Record<string, string | null> } | null = null
+
+async function latestToolVersions() {
+  const now = Date.now()
+  if (latestToolVersionsCache && latestToolVersionsCache.expiresAt > now) return latestToolVersionsCache.versions
+  const entries = await Promise.all(Object.entries(TOOL_NPM_PACKAGES).map(async ([tool, packageName]) => {
+    try {
+      const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`, {
+        headers: { accept: "application/json" },
+        signal: AbortSignal.timeout(5_000),
+      })
+      if (!response.ok) return [tool, null] as const
+      const body = await response.json() as { version?: unknown }
+      const version = typeof body.version === "string" && body.version.length <= 64 ? body.version : null
+      return [tool, version] as const
+    } catch {
+      return [tool, null] as const
+    }
+  }))
+  try {
+    // Hermes is a Python application installed by Nous Research's official
+    // installer, not the unrelated/unofficial npm bridge. PyPI carries its
+    // canonical application version.
+    const response = await fetch("https://pypi.org/pypi/hermes-agent/json", {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(5_000),
+    })
+    const body = response.ok ? await response.json() as { info?: { version?: unknown } } : null
+    const version = typeof body?.info?.version === "string" && body.info.version.length <= 64 ? body.info.version : null
+    entries.push(["hermes", version])
+  } catch {
+    entries.push(["hermes", null])
+  }
+  const versions = Object.fromEntries(entries) as Record<string, string | null>
+  // Cache successful registry lookups for 10 minutes. A complete network
+  // failure is cached only briefly so a transient outage recovers quickly.
+  latestToolVersionsCache = {
+    expiresAt: now + (Object.values(versions).some(Boolean) ? 10 * 60_000 : 30_000),
+    versions,
+  }
+  return versions
+}
+
 // ponytail (BUG-01): tasks endpoint returns strictly-shaped rows. payload_json
 // and result_json originally held raw agent payloads/responses that contain
 // API keys and generated configs; returning them to viewers or even operators
@@ -53,6 +104,11 @@ function serializeTaskForList(row: any) {
 }
 
 export function registerServersRoutes(app: FastifyInstance) {
+  app.get("/api/tools/latest", async () => ({
+    versions: await latestToolVersions(),
+    checked_at: Date.now(),
+  }))
+
   app.get("/api/servers", () => {
     return db
       .prepare("SELECT id,name,os,arch,host,status,last_seen,tags,group_id,agent_version,created_at FROM servers ORDER BY name")
@@ -132,11 +188,15 @@ export function registerServersRoutes(app: FastifyInstance) {
     const exists = db.prepare("SELECT id FROM servers WHERE id=?").get(req.params.id)
     if (!exists) return reply.code(404).send({ error: "not found" })
     const tool = String(req.query?.tool || "").trim()
-    if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+    if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
     const row = db
       .prepare("SELECT format,version,source,updated_by,updated_at,content,encrypted_content,encrypted_content_iv,content_sha256 FROM configs WHERE server_id=? AND tool=? ORDER BY version DESC LIMIT 1")
       .get(req.params.id, tool) as any
-    if (!row) return reply.code(404).send({ error: "no config recorded" })
+    // A newly enrolled server/tool has no console-side snapshot until the
+    // first read_config finishes. This is a normal empty state, not a missing
+    // resource: return JSON null so opening the config tab does not surface a
+    // misleading 404 error.
+    if (!row) return null
     let content = ""
     if (row.encrypted_content && row.encrypted_content_iv) {
       const dec = decrypt(row.encrypted_content, row.encrypted_content_iv)
@@ -165,7 +225,7 @@ export function registerServersRoutes(app: FastifyInstance) {
     const server = db.prepare("SELECT id FROM servers WHERE id=?").get(req.params.id)
     if (!server) return reply.code(404).send({ error: "not found" })
     const tool = String(req.body?.tool || "codex").trim()
-    if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+    if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
     return reply.code(201).send(createAgentTask(req.params.id, user.id, "read_config", { tool }))
   })
 
@@ -178,7 +238,7 @@ export function registerServersRoutes(app: FastifyInstance) {
       const tool = String(req.body?.tool || "codex").trim()
       const format = String(req.body?.format || "text").trim()
       const content = String(req.body?.content || "")
-      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+      if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
       if (!content.trim()) return reply.code(400).send({ error: "content is required" })
       // ponytail (BUG-01): manual write may contain a raw API key inside
       // opencode.json / settings.json. Treat as sensitive: payload_json only
@@ -201,7 +261,7 @@ export function registerServersRoutes(app: FastifyInstance) {
     const server = db.prepare("SELECT id FROM servers WHERE id=?").get(req.params.id)
     if (!server) return reply.code(404).send({ error: "not found" })
     const tool = String(req.body?.tool || "codex").trim()
-    if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+    if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
     return reply.code(201).send(createAgentTask(req.params.id, user.id, "list_config_backups", { tool }))
   })
 
@@ -213,7 +273,7 @@ export function registerServersRoutes(app: FastifyInstance) {
       if (!server) return reply.code(404).send({ error: "not found" })
       const tool = String(req.body?.tool || "codex").trim()
       const backup = String(req.body?.backup || "").trim()
-      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+      if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
       if (!backup) return reply.code(400).send({ error: "backup is required" })
       return reply.code(201).send(createAgentTask(req.params.id, user.id, "restore_config_backup", { tool, backup }))
     }
@@ -236,7 +296,7 @@ export function registerServersRoutes(app: FastifyInstance) {
       const tool = String(req.body?.tool || "").trim()
       const providerId = String(req.body?.provider_id || "").trim()
       const keyId = String(req.body?.key_id || "").trim()
-      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool for credential delivery" })
+      if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool for credential delivery" })
       if (!providerId || !keyId) return reply.code(400).send({ error: "provider_id and key_id are required" })
 
       const key = db
@@ -304,7 +364,7 @@ export function registerServersRoutes(app: FastifyInstance) {
       const tool = String(req.body?.tool || "").trim()
       const action = String(req.body?.action || "").trim()
       const version = req.body?.version ? String(req.body.version).trim() : undefined
-      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+      if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
       if (!["install", "upgrade", "uninstall"].includes(action)) return reply.code(400).send({ error: "unsupported tool action" })
       // The agent passes this only as an npm package version/tag, never to a shell.
       // Limit it here too, so the task queue cannot become a generic npm installer.
@@ -323,7 +383,7 @@ export function registerServersRoutes(app: FastifyInstance) {
       if (!server) return reply.code(404).send({ error: "not found" })
       const tool = String(req.body?.tool || "codex").trim()
       const version = req.body?.version ? String(req.body.version).trim() : undefined
-      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+      if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
       if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: "invalid version or npm tag" })
       return reply.code(201).send(createAgentTask(req.params.id, user.id, "manage_tool", { tool, action: "upgrade", version }))
     }
@@ -338,7 +398,7 @@ export function registerServersRoutes(app: FastifyInstance) {
       const tool = String(req.body?.tool || "").trim()
       const providerId = req.body?.provider_id ? String(req.body.provider_id).trim() : null
       const keyId = req.body?.key_id ? String(req.body.key_id).trim() : null
-      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool for credential removal" })
+      if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "unsupported tool for credential removal" })
 
       // ponytail: 卸载需要真正清空配置文件里的 apikey 字段，而不只是删凭据文件。
       //   - codex: config.toml 按 spec 本来就不含 apikey，仅 remove_credential
@@ -386,6 +446,18 @@ export function registerServersRoutes(app: FastifyInstance) {
           user.id,
           "write_config",
           { tool, format: "json", content: JSON.stringify({ providers: {} }) },
+          { auditMeta: { tool, action: "scrub_config_on_remove", provider_id: providerId, key_id: keyId } }
+        ))
+      }
+
+      if (tool === "hermes") {
+        // Hermes keeps custom endpoint API keys inline in config.yaml. JSON is
+        // valid YAML, so this minimal document safely removes every managed key.
+        return reply.code(201).send(createAgentTask(
+          req.params.id,
+          user.id,
+          "write_config",
+          { tool, format: "yaml", content: JSON.stringify({ model: "", providers: {} }) },
           { auditMeta: { tool, action: "scrub_config_on_remove", provider_id: providerId, key_id: keyId } }
         ))
       }

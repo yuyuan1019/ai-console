@@ -14,6 +14,7 @@ const TOOLS = [
   { key: "gemini", label: "Gemini", desc: "Google Gemini CLI" },
   { key: "opencode", label: "OpenCode", desc: "OpenCode editor · 支持多渠道" },
   { key: "pi", label: "Pi", desc: "Pi 终端编码 agent · 支持多渠道" },
+  { key: "hermes", label: "Hermes", desc: "Nous Research Hermes Agent" },
 ]
 
 export function BatchPage() {

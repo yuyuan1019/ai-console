@@ -302,6 +302,36 @@ export function generateConfig(tool: string, opts: {
     return { content: JSON.stringify(config, null, 2), format: "json" }
   }
 
+  if (tool === "hermes") {
+    // Hermes reads YAML, and JSON is a strict YAML subset. Emitting JSON keeps
+    // arbitrary provider/model labels safely escaped without adding a YAML
+    // serializer dependency. Hermes v12+ calls custom endpoints `providers`.
+    const transport = opts.api_format === "anthropic"
+      ? "anthropic_messages"
+      : opts.api_format === "openai_responses"
+        ? "codex_responses"
+        : "chat_completions"
+    const modelIds = [...new Set([model, ...(opts.models || [])].filter(Boolean))]
+    const config = {
+      _config_version: 33,
+      model: {
+        default: model,
+        provider: providerId,
+      },
+      providers: {
+        [providerId]: {
+          name: providerLabel,
+          api: transport === "anthropic_messages" ? baseUrl : openAiBaseUrl,
+          api_key: apiKey,
+          default_model: model,
+          transport,
+          models: Object.fromEntries(modelIds.map((id) => [id, {}])),
+        },
+      },
+    }
+    return { content: JSON.stringify(config, null, 2), format: "yaml" }
+  }
+
   return { content: JSON.stringify({ base_url: baseUrl, api_key: apiKey, model }, null, 2), format: "json" }
 }
 

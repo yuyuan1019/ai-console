@@ -731,7 +731,7 @@ func (a *Agent) handleCmd(action string, payload []byte) (map[string]interface{}
 // validTools mirrors the toolConfigPath switch: only these tools may name a
 // credential or config file. Anything else is rejected to prevent
 // filepath.Join(credsDir, tool+".sh") from escaping credsDir (bug 13).
-var validTools = map[string]bool{"codex": true, "claude": true, "gemini": true, "opencode": true, "pi": true}
+var validTools = map[string]bool{"codex": true, "claude": true, "gemini": true, "opencode": true, "pi": true, "hermes": true}
 
 func validTool(tool string) bool { return validTools[tool] }
 
@@ -759,6 +759,12 @@ func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 	// bug 13: 白名单校验 tool，防止 credFile 拼接出 credsDir 之外的路径。
 	if !validTool(p.Tool) {
 		return nil, "unsupported tool"
+	}
+
+	if p.Tool == "opencode" || p.Tool == "pi" || p.Tool == "hermes" {
+		// These tools keep provider credentials inside their native config file;
+		// write_config owns delivery and no shell credential file is needed.
+		return map[string]interface{}{"format": "inline-config", "keys": []string{}}, ""
 	}
 
 	if p.Tool == "codex" {
@@ -863,6 +869,10 @@ func toolConfigPath(tool string) string {
 		// ponytail: pi 读 ~/.pi/agent/models.json（自定义 provider/model 配置）。
 		// 凭据（apiKey）内联在 provider 块，与 opencode 同构——无独立凭据文件。
 		return filepath.Join(home, ".pi", "agent", "models.json")
+	case "hermes":
+		// Hermes accepts JSON syntax in config.yaml because JSON is a YAML subset.
+		// Provider credentials are intentionally kept in this private 0600 file.
+		return filepath.Join(home, ".hermes", "config.yaml")
 	}
 	return ""
 }
@@ -1260,10 +1270,19 @@ var npmVersionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 func installedTool(tool string) (path, version string) {
 	path, _ = exec.LookPath(tool)
+	if path == "" && tool == "hermes" {
+		// User services do not always inherit ~/.local/bin even though the
+		// official Hermes installer places its command shim there.
+		home, _ := os.UserHomeDir()
+		candidate := filepath.Join(home, ".local", "bin", "hermes")
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0111 != 0 {
+			path = candidate
+		}
+	}
 	if path == "" {
 		return "", ""
 	}
-	out, err := exec.Command(tool, "--version").CombinedOutput()
+	out, err := exec.Command(path, "--version").CombinedOutput()
 	if err == nil {
 		version = firstLine(string(out))
 	}
@@ -1279,10 +1298,6 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return nil, fmt.Sprintf("invalid tool management payload: %v", err)
 	}
-	pkg, supported := npmToolPackages[p.Tool]
-	if !supported {
-		return nil, "unsupported tool"
-	}
 	if p.Action != "install" && p.Action != "upgrade" && p.Action != "uninstall" {
 		return nil, "unsupported tool action"
 	}
@@ -1294,6 +1309,13 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 	}
 
 	oldPath, oldVersion := installedTool(p.Tool)
+	if p.Tool == "hermes" {
+		return a.handleManageHermes(p.Action, oldPath, oldVersion)
+	}
+	pkg, supported := npmToolPackages[p.Tool]
+	if !supported {
+		return nil, "unsupported tool"
+	}
 	result := map[string]interface{}{
 		"tool":        p.Tool,
 		"action":      p.Action,
@@ -1341,6 +1363,75 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 	return result, ""
 }
 
+func (a *Agent) handleManageHermes(action, oldPath, oldVersion string) (map[string]interface{}, string) {
+	result := map[string]interface{}{
+		"tool":        "hermes",
+		"action":      action,
+		"package":     "NousResearch/hermes-agent",
+		"old_version": oldVersion,
+		"old_path":    oldPath,
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	var cmd *exec.Cmd
+	if action == "install" {
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://hermes-agent.nousresearch.com/install.sh", nil)
+		if err != nil {
+			return result, fmt.Sprintf("build Hermes installer request: %v", err)
+		}
+		response, err := (&http.Client{Timeout: 30 * time.Second}).Do(request)
+		if err != nil {
+			return result, fmt.Sprintf("download Hermes installer: %v", err)
+		}
+		defer response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			return result, fmt.Sprintf("download Hermes installer: HTTP %d", response.StatusCode)
+		}
+		script, err := io.ReadAll(io.LimitReader(response.Body, 2*1024*1024+1))
+		if err != nil || len(script) > 2*1024*1024 {
+			return result, "download Hermes installer: invalid or oversized response"
+		}
+		tmp, err := os.CreateTemp(a.dir, "hermes-install-*.sh")
+		if err != nil {
+			return result, fmt.Sprintf("create Hermes installer: %v", err)
+		}
+		tmpPath := tmp.Name()
+		defer os.Remove(tmpPath)
+		if _, err = tmp.Write(script); err != nil {
+			tmp.Close()
+			return result, fmt.Sprintf("write Hermes installer: %v", err)
+		}
+		if err = tmp.Close(); err != nil {
+			return result, fmt.Sprintf("close Hermes installer: %v", err)
+		}
+		cmd = exec.CommandContext(ctx, "bash", tmpPath, "--skip-setup", "--non-interactive")
+	} else {
+		if oldPath == "" {
+			return result, "Hermes is not installed"
+		}
+		args := []string{"update", "--yes"}
+		if action == "uninstall" {
+			// Default Hermes uninstall removes the CLI but intentionally retains
+			// ~/.hermes configuration/data; `--full` is never used here.
+			args = []string{"uninstall", "--yes"}
+		}
+		cmd = exec.CommandContext(ctx, oldPath, args...)
+	}
+	output, runErr := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return result, "Hermes command timed out after 20 minutes"
+	}
+	if runErr != nil {
+		return result, fmt.Sprintf("Hermes %s failed: %v", action, runErr)
+	}
+	path, version := installedTool("hermes")
+	result["installed"] = path != ""
+	result["path"] = path
+	result["new_version"] = version
+	result["output_bytes"] = len(output)
+	return result, ""
+}
+
 func (a *Agent) handleUpgradeTool(payload []byte) (map[string]interface{}, string) {
 	// Compatibility for a task sent by a pre-tool-management console.
 	var p struct {
@@ -1361,18 +1452,10 @@ func (a *Agent) handleUpgradeTool(payload []byte) (map[string]interface{}, strin
 
 func detectTools() []map[string]interface{} {
 	var tools []map[string]interface{}
-	for _, t := range []string{"codex", "claude", "gemini", "opencode", "pi"} {
-		path, _ := exec.LookPath(t)
-		installed := path != ""
-		version := ""
-		if installed {
-			out, err := exec.Command(t, "--version").CombinedOutput()
-			if err == nil {
-				version = firstLine(string(out))
-			}
-		}
+	for _, t := range []string{"codex", "claude", "gemini", "opencode", "pi", "hermes"} {
+		path, version := installedTool(t)
 		tools = append(tools, map[string]interface{}{
-			"name": t, "installed": installed, "version": version, "path": path,
+			"name": t, "installed": path != "", "version": version, "path": path,
 		})
 	}
 	return tools
@@ -1415,6 +1498,9 @@ func firstLine(s string) string {
 func formatForTool(tool string) string {
 	if tool == "codex" {
 		return "toml"
+	}
+	if tool == "hermes" {
+		return "yaml"
 	}
 	return "json"
 }

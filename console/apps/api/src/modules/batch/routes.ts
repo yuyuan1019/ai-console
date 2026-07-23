@@ -12,7 +12,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
     "/api/batch/preview",
     async (req, reply) => {
       const tool = String(req.body?.tool || "").trim()
-      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
+      if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
 
       const keyEntries: Array<{ providerId: string; keyId: string; modelId: string; primary?: boolean }> = []
       if (Array.isArray(req.body?.keys) && req.body!.keys.length > 0 && (tool === "opencode" || tool === "pi")) {
@@ -113,7 +113,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
     const user = (req as any).auth as AuthUser
     const tool = String(req.body?.tool || "").trim()
     const serverIds = Array.isArray(req.body?.server_ids) ? req.body!.server_ids!.map(String) : []
-    if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
+    if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) return reply.code(400).send({ error: "invalid tool" })
     if (serverIds.length === 0) return reply.code(400).send({ error: "server_ids required" })
 
     const keyEntries: Array<{ providerId: string; keyId: string; modelId: string; primary?: boolean }> = []

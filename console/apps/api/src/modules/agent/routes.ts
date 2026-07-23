@@ -160,7 +160,7 @@ export function handleTaskResult(serverId: string, taskId: string, nonce: string
   if (ok && task.action === "manage_tool" && rawResult) {
     const payload = JSON.parse(task.payload_json || "{}")
     const tool = String(payload.tool || "")
-    if (["codex", "claude", "gemini", "opencode", "pi"].includes(tool) && typeof rawResult.installed === "boolean") {
+    if (["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool) && typeof rawResult.installed === "boolean") {
       db.prepare(
         `INSERT INTO tools(server_id,name,installed,version,path,detected_at)
          VALUES(?,?,?,?,?,?)
@@ -298,7 +298,7 @@ function materializeInnerPayload(action: string, payload: any): any {
     const tool = String(payload.tool || "").trim()
     const providerId = String(payload.provider_id || "").trim()
     const keyId = String(payload.key_id || "").trim()
-    if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) throw new Error("unsupported tool for credential delivery")
+    if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) throw new Error("unsupported tool for credential delivery")
     if (!providerId || !keyId) throw new Error("provider_id and key_id are required")
 
     const key = db
@@ -331,6 +331,9 @@ function materializeInnerPayload(action: string, payload: any): any {
     } else if (tool === "pi") {
       // ponytail: pi reads ~/.pi/agent/models.json，apiKey 内联在 provider 块里
       // （同 opencode）。凭据全部走 write_config，set_credential 这里 no-op。
+    } else if (tool === "hermes") {
+      // Hermes custom providers keep api_key inside ~/.hermes/config.yaml.
+      // Delivery therefore uses write_config only, with no shell env file.
     }
     return { tool, credentials }
   }
@@ -340,7 +343,7 @@ function materializeInnerPayload(action: string, payload: any): any {
 
 function materializeProviderRefs(payload: any): any {
   const tool = String(payload.tool || "").trim()
-  if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) throw new Error("unsupported tool for provider_refs")
+  if (!["codex", "claude", "gemini", "opencode", "pi", "hermes"].includes(tool)) throw new Error("unsupported tool for provider_refs")
   const entries: Array<{ provider_id: string; key_id: string; model_id: string; primary?: boolean }> = Array.isArray(payload.entries) ? payload.entries : []
   if (entries.length === 0) throw new Error("provider_refs entries are required")
 
@@ -598,7 +601,7 @@ fi
 
 echo ""
 echo "Agent uninstalled successfully."
-echo "Your CLI tools (codex/claude/gemini/opencode) and their configs are NOT touched."
+echo "Your CLI tools (codex/claude/gemini/opencode/pi/hermes) and their configs are NOT touched."
 `)
   })
 

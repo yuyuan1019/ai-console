@@ -28,6 +28,14 @@ export function useServer(id: string | undefined) {
   })
 }
 
+export function useLatestToolVersions() {
+  return useQuery({
+    queryKey: ["tools", "latest"],
+    queryFn: api.latestToolVersions,
+    staleTime: 10 * 60_000,
+  })
+}
+
 export function useServerTasks(id: string | undefined) {
   const queryClient = useQueryClient()
   const query = useQuery({
@@ -46,14 +54,14 @@ export function useServerTasks(id: string | undefined) {
   return query
 }
 
-export function useLatestConfig(id: string | undefined, tool: string) {
+export function useLatestConfig(id: string | undefined, tool: string, enabled = true) {
   const queryClient = useQueryClient()
   const toolRef = useRef(tool)
   toolRef.current = tool
   const query = useQuery({
     queryKey: ["server", id, "config", tool],
     queryFn: () => api.getLatestConfig(id!, tool),
-    enabled: !!id && !!tool,
+    enabled: enabled && !!id && !!tool,
     refetchInterval: 10000,
   })
   useEffect(() => {
