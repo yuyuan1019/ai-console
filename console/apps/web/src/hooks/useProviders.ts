@@ -62,13 +62,17 @@ export function useCreateProvider() {
   })
 }
 
-export function useImportAccountCredential(providerId: string | undefined) {
+export function useImportAccountCredential(providerId?: string) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (input: { serverId: string; tool: "codex" | "claude"; label: string }) =>
-      api.importAccountCredential(input.serverId, { tool: input.tool, provider_id: providerId!, label: input.label }),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["provider", providerId] })
+    mutationFn: (input: { serverId: string; tool: "codex" | "claude"; label: string; providerId?: string }) => {
+      const targetProviderId = input.providerId || providerId
+      if (!targetProviderId) throw new Error("provider id is required")
+      return api.importAccountCredential(input.serverId, { tool: input.tool, provider_id: targetProviderId, label: input.label })
+    },
+    onSuccess: (_result, input) => {
+      const targetProviderId = input.providerId || providerId
+      void queryClient.invalidateQueries({ queryKey: ["provider", targetProviderId] })
       void queryClient.invalidateQueries({ queryKey: ["providers"] })
     },
   })

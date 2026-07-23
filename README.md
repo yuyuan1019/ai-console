@@ -137,7 +137,7 @@ Codex, Claude, Gemini, and Pi use allowlisted npm packages. OpenCode delegates u
 ### 订阅账户登录 / Subscription Account Login
 
 1. 先在一台已接入的来源机器上正常执行 `codex login` 或 `claude auth login`。
-2. 进入供应商详情，在“添加新 Key / 凭据组”中选择“Codex 订阅登录”或“Claude 订阅登录”，再选择来源服务器。
+2. 在“供应商”页面点击“新增”，选择 OpenAI 或 Anthropic，再选择“Codex 订阅登录”或“Claude 订阅登录”及来源服务器。控制台会先读取登录信息；若来源机器尚未登录，页面会提示对应登录命令，完成后可点击“重新读取”。
 3. Agent 读取 `~/.codex/auth.json` 或 `~/.claude/.credentials.json`（macOS Claude 也支持 Login Keychain），通过 TLS/WebSocket 返回控制台。
 4. 控制台只保存 AES-256-GCM 密文；任务结果和审计日志仅记录指纹，不保存 access/refresh token。
 5. 在单机“凭据下发”或批量下发页面选择该订阅凭据。目标文件写入权限为 `0600`，覆盖前会创建 `0600` 备份。

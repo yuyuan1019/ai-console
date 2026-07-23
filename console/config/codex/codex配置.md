@@ -34,7 +34,7 @@ AI Console 不会把 Codex API Key 写入 `config.toml` 或全局环境变量。
 codex login
 ```
 
-登录成功后 Codex 会把账户会话写入 `~/.codex/auth.json`，其中包含 `auth_mode`、`tokens` 和刷新时间等字段。在供应商详情中新增“Codex 订阅登录”，选择该来源服务器后，AI Console 会读取完整文件、验证 access/refresh token，并以 AES-256-GCM 密文保存。
+登录成功后 Codex 会把账户会话写入 `~/.codex/auth.json`，其中包含 `auth_mode`、`tokens` 和刷新时间等字段。在“供应商”页面点击“新增”→“OpenAI”→“Codex 订阅登录”，选择该来源服务器后，AI Console 会读取完整文件、验证 access/refresh token，并以 AES-256-GCM 密文保存。若尚未登录，页面会提示执行 `codex login`，登录后可直接点击“重新读取”。
 
 下发订阅登录时只覆盖目标机器的 `~/.codex/auth.json`，不生成 `OPENAI_API_KEY`，也不修改 Base URL。文件和覆盖前备份均为 `0600`。任务记录与审计日志不保存 token 明文。
 

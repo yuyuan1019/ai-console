@@ -4,9 +4,19 @@ import { ChevronRight, ExternalLink, Key, Loader2, Plus, Trash2, Upload, X, Aler
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { useCreateProvider, useDeleteProvider, useImportCcSwitch, useImportJobs, useProviders, useQuickAddProvider, useRollbackImport } from "@/hooks/useProviders"
+import { useCreateProvider, useDeleteProvider, useImportAccountCredential, useImportCcSwitch, useImportJobs, useProviders, useQuickAddProvider, useRollbackImport } from "@/hooks/useProviders"
+import { useServers, useServerTasks } from "@/hooks/useServers"
 import { PROVIDER_PRESETS } from "@/lib/providerPresets"
 import type { ImportJobItem } from "@/lib/api"
+
+type LoginImportState = {
+  taskId: string
+  serverId: string
+  providerId: string
+  providerName: string
+  tool: "codex" | "claude"
+  label: string
+}
 
 const TABS: { key: string; label: string; color: string }[] = [
   { key: "all", label: "全部", color: "" },
@@ -24,7 +34,9 @@ export function ProvidersPage() {
   const { data, isLoading } = useProviders()
   const createProvider = useCreateProvider()
   const quickAdd = useQuickAddProvider()
+  const importAccountCredential = useImportAccountCredential()
   const deleteProvider = useDeleteProvider()
+  const { data: servers = [] } = useServers()
   const importCcSwitch = useImportCcSwitch()
   const importJobs = useImportJobs()
   const rollbackImport = useRollbackImport()
@@ -36,6 +48,10 @@ export function ProvidersPage() {
   const [apiKey, setApiKey] = useState("")
   const [label, setLabel] = useState("")
   const [selectedPresetKey, setSelectedPresetKey] = useState<string | null>(null)
+  const [credentialMode, setCredentialMode] = useState<"apikey" | "subscription">("apikey")
+  const [sourceServerId, setSourceServerId] = useState("")
+  const [loginImport, setLoginImport] = useState<LoginImportState | null>(null)
+  const { data: loginImportTasks = [] } = useServerTasks(loginImport?.serverId)
   const [error, setError] = useState("")
   const [importMsg, setImportMsg] = useState("")
   const [importWarnings, setImportWarnings] = useState<string[]>([])
@@ -61,7 +77,21 @@ export function ProvidersPage() {
     () => PROVIDER_PRESETS.find((p) => p.key === selectedPresetKey) ?? null,
     [selectedPresetKey]
   )
-  const pending = createProvider.isPending || quickAdd.isPending
+  const supportsSubscription = selectedPreset?.key === "openai" || selectedPreset?.key === "anthropic"
+  const subscriptionTool: "codex" | "claude" = selectedPreset?.key === "anthropic" ? "claude" : "codex"
+  const loginImportTask = loginImportTasks.find((task) => task.id === loginImport?.taskId)
+  const pending = createProvider.isPending || quickAdd.isPending || importAccountCredential.isPending
+
+  function resetAddForm() {
+    setName("")
+    setBaseUrl("")
+    setApiKey("")
+    setLabel("")
+    setSourceServerId("")
+    setCredentialMode("apikey")
+    setSelectedPresetKey(null)
+    setShowAdd(false)
+  }
 
   async function onCreate(e: FormEvent) {
     e.preventDefault()
@@ -72,7 +102,31 @@ export function ProvidersPage() {
     const modelsEp = selectedPreset?.modelsEndpoint ?? "/v1/models"
     const presetKey = selectedPreset?.key ?? "custom"
     try {
-      if (apiKey.trim()) {
+      if (supportsSubscription && credentialMode === "subscription") {
+        if (!sourceServerId) throw new Error("请选择已经完成账户登录的来源服务器")
+        const provider = await createProvider.mutateAsync({
+          name,
+          base_url: baseUrl || null,
+          models_endpoint: modelsEp,
+          preset: presetKey,
+          enabled: true,
+        })
+        const credentialLabel = label.trim() || (subscriptionTool === "codex" ? "Codex 订阅登录" : "Claude 订阅登录")
+        const task = await importAccountCredential.mutateAsync({
+          serverId: sourceServerId,
+          providerId: provider.id,
+          tool: subscriptionTool,
+          label: credentialLabel,
+        })
+        setLoginImport({
+          taskId: task.id,
+          serverId: sourceServerId,
+          providerId: provider.id,
+          providerName: provider.name,
+          tool: subscriptionTool,
+          label: credentialLabel,
+        })
+      } else if (apiKey.trim()) {
         // 填了 key：一步创建 provider + 加密保存 key（预设常用场景）
         await quickAdd.mutateAsync({
           name,
@@ -94,14 +148,25 @@ export function ProvidersPage() {
           enabled: true,
         })
       }
-      setName("")
-      setBaseUrl("")
-      setApiKey("")
-      setLabel("")
-      setSelectedPresetKey(null)
-      setShowAdd(false)
+      resetAddForm()
     } catch (err) {
       setError(err instanceof Error ? err.message : "新增失败")
+    }
+  }
+
+  async function retryLoginImport() {
+    if (!loginImport) return
+    setError("")
+    try {
+      const task = await importAccountCredential.mutateAsync({
+        serverId: loginImport.serverId,
+        providerId: loginImport.providerId,
+        tool: loginImport.tool,
+        label: loginImport.label,
+      })
+      setLoginImport({ ...loginImport, taskId: task.id })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "重新读取登录信息失败")
     }
   }
 
@@ -173,37 +238,57 @@ export function ProvidersPage() {
             <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setShowAdd(false)}><X className="h-4 w-4" /></Button>
           </div>
 
-          {/* 常用供应商预设：点选后自动填 name/baseUrl/family/apiFormat，仅需补 API Key */}
-          <div className="space-y-1.5">
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-xs text-muted-foreground">常用供应商</span>
+          <div className="space-y-2">
+            <div className="text-xs font-medium text-muted-foreground">1. 选择供应商</div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              {PROVIDER_PRESETS.filter((preset) => preset.key === "openai" || preset.key === "anthropic").map((preset) => (
+                <button
+                  key={preset.key}
+                  type="button"
+                  onClick={() => {
+                    setSelectedPresetKey(preset.key)
+                    setName(preset.name)
+                    setBaseUrl(preset.baseUrl)
+                    setCredentialMode("apikey")
+                    setSourceServerId("")
+                    setApiKey("")
+                  }}
+                  className={`rounded-lg border p-3 text-left transition-colors ${selectedPresetKey === preset.key ? "border-primary bg-primary/10" : "border-border bg-background hover:bg-accent"}`}
+                >
+                  <div className="font-medium">{preset.name}</div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">{preset.key === "openai" ? "API Key 或 Codex 订阅账户" : "API Key 或 Claude 订阅账户"}</div>
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="text-xs text-muted-foreground">其他 API 供应商</span>
               <button
                 type="button"
-                onClick={() => setSelectedPresetKey(null)}
+                onClick={() => { setSelectedPresetKey(null); setCredentialMode("apikey"); setSourceServerId("") }}
                 className={`inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] transition-colors ${selectedPresetKey === null ? "border-primary bg-primary/10 text-primary" : "border-border bg-background hover:bg-accent"}`}
               >
                 自定义
               </button>
-              <span className="text-[11px] text-muted-foreground/70">点选预设自动填充</span>
             </div>
             {(["国外", "国内"] as const).map((region) => (
               <div key={region} className="flex flex-wrap items-center gap-1.5">
                 <span className="mr-1 text-[11px] text-muted-foreground/70">{region}</span>
-                {PROVIDER_PRESETS.filter((p) => p.region === region).map((p) => (
+                {PROVIDER_PRESETS.filter((preset) => preset.region === region && preset.key !== "openai" && preset.key !== "anthropic").map((preset) => (
                   <button
-                    key={p.key}
+                    key={preset.key}
                     type="button"
-                    title={p.description}
+                    title={preset.description}
                     onClick={() => {
-                      setSelectedPresetKey(p.key)
-                      setBaseUrl(p.baseUrl)
-                      setName((prev) => (!prev || PROVIDER_PRESETS.some((x) => x.name === prev) ? p.name : prev))
+                      setSelectedPresetKey(preset.key)
+                      setBaseUrl(preset.baseUrl)
+                      setName(preset.name)
+                      setCredentialMode("apikey")
+                      setSourceServerId("")
                     }}
-                    className={`inline-flex items-center rounded-md border px-2 py-1 text-xs transition-colors ${
-                      selectedPresetKey === p.key ? "border-primary bg-primary/10 text-primary" : "border-border bg-background hover:bg-accent"
-                    }`}
+                    className={`inline-flex items-center rounded-md border px-2 py-1 text-xs transition-colors ${selectedPresetKey === preset.key ? "border-primary bg-primary/10 text-primary" : "border-border bg-background hover:bg-accent"}`}
                   >
-                    {p.name}
+                    {preset.name}
                   </button>
                 ))}
               </div>
@@ -215,32 +300,82 @@ export function ProvidersPage() {
               <Zap className="h-3.5 w-3.5 shrink-0 text-amber-500" />
               <span className="truncate">{selectedPreset.description}</span>
               <a href={selectedPreset.docsUrl} target="_blank" rel="noreferrer" className="ml-auto inline-flex shrink-0 items-center gap-0.5 text-primary hover:underline">
-                申请 Key <ExternalLink className="h-3 w-3" />
+                {credentialMode === "subscription" ? "账户登录说明" : "申请 Key"} <ExternalLink className="h-3 w-3" />
               </a>
             </div>
           )}
 
-          <form className="flex flex-wrap items-center gap-2" onSubmit={onCreate}>
-            <Input className="w-44" placeholder="名称" value={name} onChange={(e) => setName(e.target.value)} disabled={pending} required />
-            <Input className="min-w-56 flex-1" placeholder="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} disabled={pending} />
-            <Input
-              className="min-w-56 flex-1"
-              type="text"
-              placeholder={selectedPreset ? "API Key（填写后自动创建并保存）" : "API Key（可选，留空仅建供应商）"}
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              disabled={pending}
-            />
-            <Input className="w-32" placeholder="标签" value={label} onChange={(e) => setLabel(e.target.value)} disabled={pending} />
-            <Button type="submit" size="sm" disabled={pending}>
-              {pending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Plus className="mr-1 h-4 w-4" />}
-              {apiKey.trim() ? "添加并保存 Key" : "添加"}
-            </Button>
+          {supportsSubscription && (
+            <div className="space-y-2 rounded-md border border-border p-3">
+              <div className="text-xs font-medium text-muted-foreground">2. 选择认证方式</div>
+              <div className="flex flex-wrap gap-2">
+                <button type="button" onClick={() => setCredentialMode("apikey")} className={`rounded-md border px-3 py-1.5 text-xs ${credentialMode === "apikey" ? "border-primary bg-primary/10 text-primary" : "border-border"}`}>API Key</button>
+                <button type="button" onClick={() => { setCredentialMode("subscription"); setApiKey("") }} className={`rounded-md border px-3 py-1.5 text-xs ${credentialMode === "subscription" ? "border-primary bg-primary/10 text-primary" : "border-border"}`}>
+                  {selectedPreset?.key === "openai" ? "Codex 订阅登录" : "Claude 订阅登录"}
+                </button>
+              </div>
+            </div>
+          )}
+
+          <form className="space-y-3" onSubmit={onCreate}>
+            <div className="flex flex-wrap items-center gap-2">
+              <Input className="w-44" placeholder="名称" value={name} onChange={(e) => setName(e.target.value)} disabled={pending} required />
+              <Input className="min-w-56 flex-1" placeholder="Base URL" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} disabled={pending || credentialMode === "subscription"} />
+              {credentialMode === "subscription" && supportsSubscription ? (
+                <select value={sourceServerId} onChange={(e) => setSourceServerId(e.target.value)} className="h-10 min-w-64 flex-1 rounded-md border border-input bg-background px-3 text-sm" disabled={pending} required>
+                  <option value="">选择当前已登录的服务器…</option>
+                  {servers.filter((server) => server.status === "online").map((server) => <option key={server.id} value={server.id}>{server.name} (Agent {server.agent_version || "未知"})</option>)}
+                </select>
+              ) : (
+                <Input
+                  className="min-w-56 flex-1"
+                  type="text"
+                  placeholder={selectedPreset ? "API Key" : "API Key（可选，留空仅建供应商）"}
+                  value={apiKey}
+                  onChange={(e) => setApiKey(e.target.value)}
+                  disabled={pending}
+                  required={Boolean(selectedPreset)}
+                />
+              )}
+              <Input className="w-40" placeholder="凭据标签（可选）" value={label} onChange={(e) => setLabel(e.target.value)} disabled={pending} />
+              <Button type="submit" size="sm" disabled={pending || (credentialMode === "subscription" && !sourceServerId)}>
+                {pending ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Plus className="mr-1 h-4 w-4" />}
+                {credentialMode === "subscription" && supportsSubscription ? "读取登录并保存" : apiKey.trim() ? "添加并保存 Key" : "添加"}
+              </Button>
+            </div>
+            {credentialMode === "subscription" && supportsSubscription && (
+              <div className="rounded-md bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
+                系统会先读取来源服务器上的登录信息。请预先运行 <code>{subscriptionTool === "codex" ? "codex login" : "claude auth login"}</code>；如果尚未登录，保存后的任务会明确提示登录并可重新读取。
+              </div>
+            )}
           </form>
         </div>
       )}
 
       {error && <p className="text-sm text-destructive">{error}</p>}
+      {loginImport && (
+        <div className={`rounded-md border p-3 ${loginImportTask?.status === "done" ? "border-emerald-200 bg-emerald-50 dark:border-emerald-800 dark:bg-emerald-950" : loginImportTask?.status === "failed" ? "border-red-200 bg-red-50 dark:border-red-800 dark:bg-red-950" : "border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950"}`}>
+          {loginImportTask?.status === "done" ? (
+            <div className="flex flex-wrap items-center gap-2 text-sm text-emerald-700 dark:text-emerald-400">
+              <CheckCircle className="h-4 w-4" />
+              <span>{loginImport.providerName} 的订阅登录已加密保存，可以下发到其他机器。</span>
+              <Link to={`/providers/${loginImport.providerId}`} className="font-medium underline">查看凭据</Link>
+            </div>
+          ) : loginImportTask?.status === "failed" ? (
+            <div className="space-y-2 text-sm text-red-700 dark:text-red-400">
+              <div className="flex items-center gap-1.5"><AlertTriangle className="h-4 w-4" />未读取到有效登录信息：{loginImportTask.error || "读取失败"}</div>
+              <div className="text-xs">请确认来源服务器 Agent 已升级到 v2.0.6，并运行 <code>{loginImport.tool === "codex" ? "codex login" : "claude auth login"}</code>，完成后点击重新读取。</div>
+              <Button size="sm" variant="outline" disabled={importAccountCredential.isPending} onClick={() => void retryLoginImport()}>
+                {importAccountCredential.isPending ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="mr-1 h-3.5 w-3.5" />}重新读取
+              </Button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-1.5 text-sm text-blue-700 dark:text-blue-400">
+              <Loader2 className="h-4 w-4 animate-spin" />正在从来源服务器读取并验证订阅登录信息…
+            </div>
+          )}
+        </div>
+      )}
       {importMsg && (
         <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 dark:border-emerald-800 dark:bg-emerald-950">
           <div className="flex items-center gap-1.5 text-sm font-medium text-emerald-700 dark:text-emerald-400">
