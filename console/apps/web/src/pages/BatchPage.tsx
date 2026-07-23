@@ -33,23 +33,25 @@ export function BatchPage() {
   const { data: providerDetail } = useProvider(providerId || undefined, keyId || undefined)
   const refreshModelsMut = useRefreshModels(providerId || undefined)
   const refreshedKeyRef = useRef<string>("")
+  const selectedCredential = providerDetail?.keys.find((key) => key.id === keyId)
+  const isSubscriptionCredential = selectedCredential?.auth_type === "codex_subscription" || selectedCredential?.auth_type === "claude_subscription"
 
   // ponytail: 选了 key 但该 key 一个模型都没有时，自动调一次「刷新模型」拉取并
   // 导入。用 ref 记录已刷新过的 key，避免 providerDetail 重取时重复打远端。
   // 刷新后仍为空或接口报错 → noModels=true，UI 提醒并阻止继续（modelId 为空
   // 天然让 canPreview / addKeyEntry 失效，无法预览或加入渠道）。
   useEffect(() => {
-    if (!providerId || !keyId) { refreshedKeyRef.current = ""; return }
+    if (!providerId || !keyId || isSubscriptionCredential) { refreshedKeyRef.current = ""; return }
     if (refreshedKeyRef.current === keyId) return
     if (providerDetail && providerDetail.models.length === 0 && !refreshModelsMut.isPending) {
       refreshedKeyRef.current = keyId
       refreshModelsMut.mutate(keyId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [providerId, keyId, providerDetail])
+  }, [providerId, keyId, providerDetail, isSubscriptionCredential])
 
-  const isRefreshingModels = !!providerId && !!keyId && refreshModelsMut.isPending
-  const refreshDone = !!keyId && refreshedKeyRef.current === keyId && !refreshModelsMut.isPending
+  const isRefreshingModels = !isSubscriptionCredential && !!providerId && !!keyId && refreshModelsMut.isPending
+  const refreshDone = !isSubscriptionCredential && !!keyId && refreshedKeyRef.current === keyId && !refreshModelsMut.isPending
   const noModels = refreshDone && (providerDetail?.models || []).length === 0
   const noModelsHint = noModels
     ? refreshModelsMut.isError
@@ -76,7 +78,7 @@ export function BatchPage() {
     setPreview(null)
     if (multiKeyTool && selectedKeys.length > 0) {
       previewMut.mutate({ tool, keys: selectedKeys }, { onSuccess: setPreview, onError: (e) => alert(String(e)) })
-    } else if (providerId && keyId && modelId) {
+    } else if (providerId && keyId && (modelId || isSubscriptionCredential)) {
       previewMut.mutate({ tool, provider_id: providerId, key_id: keyId, model_id: modelId }, { onSuccess: setPreview, onError: (e) => alert(String(e)) })
     }
   }
@@ -91,7 +93,10 @@ export function BatchPage() {
   }
 
   function doExecute() {
-    if (!confirm(`确认下发 ${tool} 配置到 ${selectedServers.size} 台机器？每台机器会先备份当前配置。`)) return
+    const message = isSubscriptionCredential
+      ? `确认把 ${tool} 订阅登录下发到 ${selectedServers.size} 台机器？目标机器现有账户登录文件会被覆盖。`
+      : `确认下发 ${tool} 配置到 ${selectedServers.size} 台机器？每台机器会先备份当前配置。`
+    if (!confirm(message)) return
     const onSuccess = (r: { id: string }) => { setBatchId(r.id); setStep(4) }
     const onError = (e: Error) => alert(String(e))
     if (multiKeyTool && selectedKeys.length > 0) {
@@ -125,7 +130,7 @@ export function BatchPage() {
     })
   }
 
-  const canPreview = (multiKeyTool && selectedKeys.length > 0) || (!!providerId && !!keyId && !!modelId)
+  const canPreview = (multiKeyTool && selectedKeys.length > 0) || (!!providerId && !!keyId && (!!modelId || isSubscriptionCredential))
 
   function addKeyEntry() {
     if (!providerId || !keyId || !modelId) return
@@ -144,13 +149,18 @@ export function BatchPage() {
     setSelectedKeys(selectedKeys.map((k) => ({ ...k, primary: k.key_id === keyId })))
   }
 
-  const availableProviderKeys = providerDetail?.keys.filter((k) => k.enabled === 1 && !selectedKeys.some((sk) => sk.key_id === k.id)) || []
+  const availableProviderKeys = providerDetail?.keys.filter((k) => {
+    if (k.enabled !== 1 || !k.has_secret || selectedKeys.some((sk) => sk.key_id === k.id)) return false
+    if (k.auth_type === "codex_subscription") return tool === "codex"
+    if (k.auth_type === "claude_subscription") return tool === "claude"
+    return true
+  }) || []
   const multiKey = multiKeyTool && selectedKeys.length > 0
   // ponytail (BUG-04): only enable rollback when the write pass is genuinely
   // terminal (done/partial). rolling_back/rolled_back/partial_rollback all
   // mean rollback is already unavailable; the server would 409/202 anyway,
   // but the UI should not offer the button in the first place.
-  const canRollback = batchStatus?.status === "done" || batchStatus?.status === "partial"
+  const canRollback = batchStatus?.source_type !== "subscription_credential" && (batchStatus?.status === "done" || batchStatus?.status === "partial")
   const allDone = batchStatus?.progress?.length ? batchStatus.progress.every((p) => p.state === "done" || p.state === "failed" || p.state === "skipped") : false
 
   return (
@@ -203,13 +213,13 @@ export function BatchPage() {
                 <span className="text-xs font-medium text-muted-foreground">Key</span>
                 <select value={keyId} onChange={(e) => { setKeyId(e.target.value); setModelId(""); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
                   <option value="">选择 Key…</option>
-                  {(providerDetail?.keys || []).filter((k) => k.enabled === 1).map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+                  {(providerDetail?.keys || []).filter((k) => k.enabled === 1 && k.has_secret && (k.auth_type === "apikey" || (k.auth_type === "codex_subscription" && tool === "codex") || (k.auth_type === "claude_subscription" && tool === "claude"))).map((k) => <option key={k.id} value={k.id}>{k.label}{k.auth_type === "apikey" ? "" : "（订阅登录）"}</option>)}
                 </select>
               </div>
               <div className="space-y-1">
                 <span className="text-xs font-medium text-muted-foreground">模型</span>
-                <select value={modelId} onChange={(e) => { setModelId(e.target.value); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail}>
-                  <option value="">选择模型…</option>
+                <select value={modelId} onChange={(e) => { setModelId(e.target.value); setPreview(null) }} className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm" disabled={!providerDetail || isSubscriptionCredential}>
+                  <option value="">{isSubscriptionCredential ? "订阅登录使用 CLI 当前配置" : "选择模型…"}</option>
                   {providerDetail?.models.map((m) => <option key={m.id} value={m.model_id}>{m.model_id}</option>)}
                 </select>
               </div>

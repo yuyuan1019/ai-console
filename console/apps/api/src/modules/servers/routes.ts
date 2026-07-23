@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify"
+import crypto from "node:crypto"
 import { db } from "../../core/db"
 import { decrypt } from "../../core/crypto"
 import { audit } from "../../core/audit"
@@ -287,6 +288,43 @@ export function registerServersRoutes(app: FastifyInstance) {
     return reply.code(201).send(createAgentTask(req.params.id, user.id, "detect_tools", { tool }))
   })
 
+  app.post<{ Params: { id: string }; Body: { tool?: string; provider_id?: string; label?: string } }>(
+    "/api/servers/:id/account-credentials/import",
+    async (req, reply) => {
+      const user = (req as any).auth as AuthUser
+      const server = db.prepare("SELECT id FROM servers WHERE id=?").get(req.params.id)
+      if (!server) return reply.code(404).send({ error: "server not found" })
+      const tool = String(req.body?.tool || "").trim()
+      const providerId = String(req.body?.provider_id || "").trim()
+      const label = String(req.body?.label || "").trim()
+      if (tool !== "codex" && tool !== "claude") return reply.code(400).send({ error: "subscription import supports only codex and claude" })
+      if (!providerId || !label) return reply.code(400).send({ error: "provider_id and label are required" })
+      if (label.length > 128) return reply.code(400).send({ error: "label too long" })
+      const provider = db.prepare("SELECT id FROM providers WHERE id=? AND enabled=1").get(providerId)
+      if (!provider) return reply.code(404).send({ error: "provider not found" })
+
+      const keyId = crypto.randomUUID()
+      const authType = tool === "codex" ? "codex_subscription" : "claude_subscription"
+      db.prepare(
+        `INSERT INTO provider_keys(id,provider_id,label,group_name,family,encrypted_value,iv,api_format,auth_type,enabled,created_at)
+         VALUES(?,?,?,NULL,?,NULL,NULL,NULL,?,1,?)`
+      ).run(keyId, providerId, label, tool, authType, Date.now())
+      audit(user.id, "provider_key.create_subscription", `provider_key:${keyId}`, null, {
+        provider_id: providerId,
+        source_server_id: req.params.id,
+        label,
+        family: tool,
+        auth_type: authType,
+      })
+      const task = createAgentTask(req.params.id, user.id, "read_account_credential", {
+        tool,
+        provider_id: providerId,
+        key_id: keyId,
+      })
+      return reply.code(201).send({ ...task, key_id: keyId, auth_type: authType })
+    }
+  )
+
   app.post<{ Params: { id: string }; Body: { tool?: string; provider_id?: string; key_id?: string } }>(
     "/api/servers/:id/credentials/set",
     async (req, reply) => {
@@ -300,11 +338,28 @@ export function registerServersRoutes(app: FastifyInstance) {
       if (!providerId || !keyId) return reply.code(400).send({ error: "provider_id and key_id are required" })
 
       const key = db
-        .prepare("SELECT id FROM provider_keys WHERE id=? AND provider_id=? AND enabled=1")
+        .prepare("SELECT id,auth_type,encrypted_value FROM provider_keys WHERE id=? AND provider_id=? AND enabled=1")
         .get(keyId, providerId) as any
       if (!key) return reply.code(404).send({ error: "key not found" })
 
-      // ponytail: 统一下发。所有工具都走 write_config（provider_refs 源），
+      if (key.auth_type === "codex_subscription" || key.auth_type === "claude_subscription") {
+        const expectedTool = key.auth_type === "codex_subscription" ? "codex" : "claude"
+        if (tool !== expectedTool) return reply.code(400).send({ error: `${key.auth_type} can only be delivered to ${expectedTool}` })
+        if (!key.encrypted_value) return reply.code(409).send({ error: "subscription credential import is not complete" })
+        return reply.code(201).send(createAgentTask(
+          req.params.id,
+          user.id,
+          "set_credential",
+          { tool, source: "provider_refs", redacted: true },
+          {
+            sensitivePayload: { tool, provider_id: providerId, key_id: keyId },
+            auditMeta: { tool, provider_ids: [providerId], key_ids: [keyId], auth_type: key.auth_type },
+          }
+        ))
+      }
+      if (key.auth_type !== "apikey") return reply.code(400).send({ error: "unsupported credential type" })
+
+      // ponytail: 统一下发。所有 API Key 工具都走 write_config（provider_refs 源），
       // 以前只有 opencode 这么做。materializeTaskPayload 在 dispatch 时按工具
       // 生成原生配置，明文从不落到 payload_json / audit_log / result_json。
       //   - claude/gemini/opencode: 单个 write_config（apikey 已嵌入

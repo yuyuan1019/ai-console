@@ -291,7 +291,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
     if (!p) return reply.code(404).send({ error: "not found" })
     const keys = db
       .prepare(
-        "SELECT id,label,group_name,family,api_format,auth_type,enabled,default_model_id FROM provider_keys WHERE provider_id=? AND enabled=1 ORDER BY label"
+        "SELECT id,label,group_name,family,api_format,auth_type,enabled,default_model_id,(encrypted_value IS NOT NULL) AS has_secret FROM provider_keys WHERE provider_id=? AND enabled=1 ORDER BY label"
       )
       .all(req.params.id)
     // ponytail: 可选 key_id 过滤——与 ping 一致，只返回该 key 刷新出的模型
@@ -369,7 +369,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
       throw e
     }
     const key = db
-      .prepare("SELECT id,label,family,api_format,auth_type,enabled FROM provider_keys WHERE id=?")
+      .prepare("SELECT id,label,family,api_format,auth_type,enabled,(encrypted_value IS NOT NULL) AS has_secret FROM provider_keys WHERE id=?")
       .get(id)
     return reply.code(201).send(key)
   })
@@ -429,7 +429,7 @@ export function registerProvidersRoutes(app: FastifyInstance) {
     }
 
     const after = db
-      .prepare("SELECT id,label,group_name,family,api_format,auth_type,enabled,default_model_id FROM provider_keys WHERE id=?")
+      .prepare("SELECT id,label,group_name,family,api_format,auth_type,enabled,default_model_id,(encrypted_value IS NOT NULL) AS has_secret FROM provider_keys WHERE id=?")
       .get(req.params.keyId)
     audit(user.id, "provider_key.update", `provider_key:${req.params.keyId}`, before, {
       ...after as any,

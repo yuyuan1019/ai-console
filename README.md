@@ -25,6 +25,7 @@ AI Console solves this: deploy one console + install a lightweight agent on each
 | 供应商与模型管理 | Centralize API providers, keys, and model catalogs |
 | 批量操作 | Apply config changes to multiple servers with dry-run preview |
 | CLI 生命周期管理 | Remotely detect, install, upgrade, and uninstall supported CLI tools |
+| Codex / Claude 订阅登录 | Import an existing account login from one managed machine and securely deploy it to others |
 | OpenCode / Pi 多渠道下发 | Deploy multiple provider keys into one opencode.json or pi models.json for easy switching |
 | 供应商默认模型 | Set a default model per provider, auto-selected in config generation |
 | 操作审计 | Full audit trail with request ID correlation |
@@ -100,8 +101,8 @@ The console, web app, and Agent binaries are baked into the Docker image. Rebuil
 
 | 工具 / Tool | 配置文件 / Config | 凭据 / Credential |
 |---|---|---|
-| Codex CLI | `~/.codex/config.toml` | `OPENAI_API_KEY` / `OPENAI_BASE_URL` |
-| Claude Code | `~/.claude/settings.json` | `ANTHROPIC_API_KEY` / `ANTHROPIC_BASE_URL` |
+| Codex CLI | `~/.codex/config.toml` | API Key：`~/.codex/auth.json`；订阅登录：完整 `auth.json` |
+| Claude Code | `~/.claude/settings.json` | API Key 环境配置；订阅登录：`~/.claude/.credentials.json` |
 | Gemini CLI | `~/.gemini/settings.json` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | OpenCode | `~/.config/opencode/opencode.json` | provider `apiKey` / `baseURL` |
 | Pi | `~/.pi/agent/models.json` | provider `apiKey` / `baseURL` (inline in config) |
@@ -112,6 +113,7 @@ The console, web app, and Agent binaries are baked into the Docker image. Rebuil
 | 操作 / Action | 说明 / Description |
 |---|---|
 | `read_config` | 读取配置 / Read config file |
+| `read_account_credential` | 从已登录机器导入 Codex/Claude 订阅凭据 / Import an existing subscription login |
 | `write_config` | 写入配置（写前备份）/ Write config (backs up first) |
 | `list_config_backups` | 列出备份 / List backup files |
 | `restore_config_backup` | 恢复备份 / Restore from backup |
@@ -131,6 +133,18 @@ The console, web app, and Agent binaries are baked into the Docker image. Rebuil
 - 安装或升级结束后，Agent 会重新执行 `<tool> --version`。实际版本与目标版本不一致时任务失败，不会在控制台中误报成功。
 
 Codex, Claude, Gemini, and Pi use allowlisted npm packages. OpenCode delegates upgrades to its native updater so the original installation method is preserved. Hermes uses its official lifecycle commands. Every install or upgrade is verified against the version reported by the resulting executable.
+
+### 订阅账户登录 / Subscription Account Login
+
+1. 先在一台已接入的来源机器上正常执行 `codex login` 或 `claude auth login`。
+2. 进入供应商详情，在“添加新 Key / 凭据组”中选择“Codex 订阅登录”或“Claude 订阅登录”，再选择来源服务器。
+3. Agent 读取 `~/.codex/auth.json` 或 `~/.claude/.credentials.json`（macOS Claude 也支持 Login Keychain），通过 TLS/WebSocket 返回控制台。
+4. 控制台只保存 AES-256-GCM 密文；任务结果和审计日志仅记录指纹，不保存 access/refresh token。
+5. 在单机“凭据下发”或批量下发页面选择该订阅凭据。目标文件写入权限为 `0600`，覆盖前会创建 `0600` 备份。
+
+订阅凭据不会走 API Ping、模型拉取或 Base URL 配置，也不接受账号密码。导入与下发需要来源和目标机器的 Agent 均为 `v2.0.6` 或更高版本。多个机器共用一个订阅刷新令牌可能受 OpenAI/Anthropic 的会话策略与服务条款限制，请仅用于你有权管理的账户和机器。
+
+First sign in normally on one managed source machine, then import its credential from the provider detail page. The console encrypts the complete login document and can deploy it to other managed machines without storing tokens in task or audit plaintext.
 
 ## 技术栈 / Tech Stack
 

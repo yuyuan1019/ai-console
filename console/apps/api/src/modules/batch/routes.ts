@@ -27,7 +27,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
         const providerId = String(req.body?.provider_id || "").trim()
         const keyId = String(req.body?.key_id || "").trim()
         const modelId = String(req.body?.model_id || "").trim()
-        if (!providerId || !keyId || !modelId) return reply.code(400).send({ error: "provider_id, key_id, model_id are required" })
+        if (!providerId || !keyId) return reply.code(400).send({ error: "provider_id and key_id are required" })
         keyEntries.push({ providerId, keyId, modelId })
       }
 
@@ -79,7 +79,20 @@ export function registerBatchRoutes(app: FastifyInstance) {
            WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
         .get(keyId, providerId) as any
       if (!key) return reply.code(404).send({ error: "key not found" })
-      if (key.auth_type !== "apikey" || !key.encrypted_value) return reply.code(400).send({ error: "oauth key has no secret" })
+      if (key.auth_type === "codex_subscription" || key.auth_type === "claude_subscription") {
+        const expectedTool = key.auth_type === "codex_subscription" ? "codex" : "claude"
+        if (tool !== expectedTool) return reply.code(400).send({ error: `${key.auth_type} can only be delivered to ${expectedTool}` })
+        if (!key.encrypted_value) return reply.code(409).send({ error: "subscription credential import is not complete" })
+        const credentialPath = tool === "codex" ? "~/.codex/auth.json" : "~/.claude/.credentials.json"
+        return {
+          tool,
+          model: "CLI current configuration",
+          content: JSON.stringify({ credential_type: key.auth_type, destination: credentialPath, secret: "[ENCRYPTED]" }, null, 2),
+          format: "subscription-credential",
+        }
+      }
+      if (key.auth_type !== "apikey" || !key.encrypted_value) return reply.code(400).send({ error: "unsupported credential type" })
+      if (!modelId) return reply.code(400).send({ error: "model_id is required for API Key delivery" })
 
       const secret = decrypt(key.encrypted_value, key.iv)
       if (!secret) return reply.code(400).send({ error: "decrypt failed" })
@@ -129,7 +142,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
       const providerId = String(req.body?.provider_id || "").trim()
       const keyId = String(req.body?.key_id || "").trim()
       const modelId = String(req.body?.model_id || "").trim()
-      if (!providerId || !keyId || !modelId) return reply.code(400).send({ error: "provider_id, key_id and model_id are required" })
+      if (!providerId || !keyId) return reply.code(400).send({ error: "provider_id and key_id are required" })
       keyEntries.push({ providerId, keyId, modelId })
     }
 
@@ -137,9 +150,10 @@ export function registerBatchRoutes(app: FastifyInstance) {
     // ran a full generateConfig for the UI; execute only stores provider refs
     // in each agent_task's encrypted_payload. Materialization happens on push/
     // claim inside materializeTaskPayload so plaintext never lands in DB.
-    // Still validate that every ref resolves to an enabled apikey (so the
-    // execute API fails fast on obviously-broken references without leaking
-    // secrets); we don't decrypt or generate anything here.
+    // Validate every reference without decrypting it here. API-key delivery
+    // still requires a model; Codex/Claude subscription credentials are a
+    // single credential-only task and deliberately skip config generation.
+    let subscriptionAuthType: "codex_subscription" | "claude_subscription" | null = null
     for (const ke of keyEntries) {
       const meta = db
         .prepare(`SELECT k.auth_type, k.encrypted_value
@@ -147,7 +161,15 @@ export function registerBatchRoutes(app: FastifyInstance) {
                   WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
         .get(ke.keyId, ke.providerId) as any
       if (!meta) return reply.code(404).send({ error: `key ${ke.keyId} not found` })
-      if (meta.auth_type !== "apikey" || !meta.encrypted_value) return reply.code(400).send({ error: "oauth key has no secret" })
+      if (meta.auth_type === "codex_subscription" || meta.auth_type === "claude_subscription") {
+        const expectedTool = meta.auth_type === "codex_subscription" ? "codex" : "claude"
+        if (keyEntries.length !== 1 || tool !== expectedTool) return reply.code(400).send({ error: `${meta.auth_type} can only be delivered alone to ${expectedTool}` })
+        if (!meta.encrypted_value) return reply.code(409).send({ error: "subscription credential import is not complete" })
+        subscriptionAuthType = meta.auth_type
+        continue
+      }
+      if (meta.auth_type !== "apikey" || !meta.encrypted_value) return reply.code(400).send({ error: "unsupported credential type" })
+      if (!ke.modelId) return reply.code(400).send({ error: "model_id is required for API Key delivery" })
     }
     const sourceRef = keyEntries.map((ke) => `${ke.providerId}/${ke.keyId}/${ke.modelId}`).join(",")
 
@@ -165,6 +187,18 @@ export function registerBatchRoutes(app: FastifyInstance) {
       for (const sid of serverIds) {
         const server = db.prepare("SELECT name FROM servers WHERE id=?").get(sid) as any
         if (!server) continue
+        const safePlaceholder = { tool, source: "provider_refs", redacted: true }
+        if (subscriptionAuthType) {
+          const ke = keyEntries[0]
+          const credentialTask = insertAgentTask(sid, user.id, "set_credential", safePlaceholder, {
+            sensitivePayload: { tool, provider_id: ke.providerId, key_id: ke.keyId },
+            auditMeta: { tool, provider_ids: [ke.providerId], key_ids: [ke.keyId], auth_type: subscriptionAuthType },
+          })
+          insertedIds.push(credentialTask.id)
+          progress.push({ server_id: sid, server_name: server.name, task_id: credentialTask.id, state: "pending" })
+          continue
+        }
+
         const providerRefs = {
           tool,
           source: "provider_refs" as const,
@@ -175,7 +209,6 @@ export function registerBatchRoutes(app: FastifyInstance) {
             primary: ke.primary,
           })),
         }
-        const safePlaceholder = { tool, source: "provider_refs", redacted: true }
         const task = insertAgentTask(sid, user.id, "write_config", safePlaceholder, {
           sensitivePayload: providerRefs,
           auditMeta: {
@@ -208,7 +241,7 @@ export function registerBatchRoutes(app: FastifyInstance) {
       }
       db.prepare(
         "INSERT INTO batch_jobs(id,tool,source_type,source_ref,targets_json,status,progress_json,started_by,started_at) VALUES(?,?,?,?,?,?,?,?,?)"
-      ).run(batchId, tool, "ad_hoc", sourceRef, JSON.stringify(serverIds), "running", JSON.stringify(progress), user.id, now)
+      ).run(batchId, tool, subscriptionAuthType ? "subscription_credential" : "ad_hoc", sourceRef, JSON.stringify(serverIds), "running", JSON.stringify(progress), user.id, now)
       audit(user.id, "batch.execute", `batch:${batchId}`, null, { tool, server_count: progress.length })
       db.exec("COMMIT")
     } catch (e) {

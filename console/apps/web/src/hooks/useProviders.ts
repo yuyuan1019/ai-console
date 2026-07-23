@@ -1,5 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query"
+import { useEffect } from "react"
 import { api } from "@/lib/api"
+import { subscribe } from "@/lib/ws"
 import type { CreateProviderInput, CreateProviderKeyInput, UpdateProviderInput, UpdateProviderKeyInput } from "@/lib/api"
 
 export function useProviders() {
@@ -11,6 +13,14 @@ export function useImportJobs() {
 }
 
 export function useProvider(id: string | undefined, keyId?: string) {
+  const queryClient = useQueryClient()
+  useEffect(() => {
+    if (!id) return
+    return subscribe(`provider:${id}:keys`, () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider", id] })
+      void queryClient.invalidateQueries({ queryKey: ["providers"] })
+    })
+  }, [id, queryClient])
   return useQuery({
     queryKey: ["provider", id, keyId],
     queryFn: () => api.provider(id!, keyId),
@@ -47,6 +57,18 @@ export function useCreateProvider() {
   return useMutation({
     mutationFn: (input: CreateProviderInput) => api.createProvider(input),
     onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["providers"] })
+    },
+  })
+}
+
+export function useImportAccountCredential(providerId: string | undefined) {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (input: { serverId: string; tool: "codex" | "claude"; label: string }) =>
+      api.importAccountCredential(input.serverId, { tool: input.tool, provider_id: providerId!, label: input.label }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["provider", providerId] })
       void queryClient.invalidateQueries({ queryKey: ["providers"] })
     },
   })

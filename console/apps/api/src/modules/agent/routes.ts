@@ -25,6 +25,29 @@ function resolveWebSocketArgs(first: any, second: any): { socket: any; req: any 
   return { socket: second, req: first }
 }
 
+function validateAccountCredential(tool: string, content: string): "codex_subscription" | "claude_subscription" {
+  let root: any
+  try {
+    root = JSON.parse(content)
+  } catch {
+    throw new Error("account credential is not valid JSON")
+  }
+  if (!root || typeof root !== "object" || Array.isArray(root)) throw new Error("account credential must be a JSON object")
+  if (tool === "codex") {
+    if (typeof root.tokens?.access_token !== "string" || !root.tokens.access_token || typeof root.tokens?.refresh_token !== "string" || !root.tokens.refresh_token) {
+      throw new Error("Codex auth.json has no account access/refresh tokens")
+    }
+    return "codex_subscription"
+  }
+  if (tool === "claude") {
+    if (typeof root.claudeAiOauth?.accessToken !== "string" || !root.claudeAiOauth.accessToken || typeof root.claudeAiOauth?.refreshToken !== "string" || !root.claudeAiOauth.refreshToken) {
+      throw new Error("Claude credentials have no subscription access/refresh tokens")
+    }
+    return "claude_subscription"
+  }
+  throw new Error("account credential import supports only codex and claude")
+}
+
 export function broadcastEvent(channel: string, payload: unknown) {
   const msg = JSON.stringify({ type: "event", channel, payload })
   for (const socket of browserSockets) {
@@ -82,7 +105,8 @@ export function handleTaskResult(serverId: string, taskId: string, nonce: string
   const task = db.prepare("SELECT * FROM agent_tasks WHERE id=? AND server_id=? AND status='running' AND nonce=?").get(taskId, serverId, nonce) as any
   if (!task) return { ok: false, code: "stale_task_lease" }
   const now = Date.now()
-  const ok = body.ok !== false
+  let ok = body.ok !== false
+  let taskError = String(body.error || "task failed")
   const rawResult = body.result || null
 
   // ponytail (BUG-01): scrub write_config.content BEFORE it is persisted to
@@ -93,6 +117,38 @@ export function handleTaskResult(serverId: string, taskId: string, nonce: string
   const persistedResult: Record<string, unknown> = rawResult && typeof rawResult === "object" ? { ...rawResult } : {}
   let readPlaintext: string | null = null
   let readSha256: string | null = null
+  if (task.action === "read_account_credential") {
+    const payload = JSON.parse(task.payload_json || "{}")
+    const tool = String(payload.tool || "")
+    const providerId = String(payload.provider_id || "")
+    const keyId = String(payload.key_id || "")
+    try {
+      if (!ok) throw new Error(taskError)
+      if (!rawResult || typeof rawResult.content !== "string") throw new Error("agent returned no account credential")
+      if (rawResult.content.length > 1024 * 1024) throw new Error("account credential exceeds 1 MiB")
+      const authType = validateAccountCredential(tool, rawResult.content)
+      const { encryptedValue, iv } = encrypt(rawResult.content)
+      const updated = db.prepare(
+        "UPDATE provider_keys SET encrypted_value=?, iv=?, auth_type=?, enabled=1 WHERE id=? AND provider_id=?"
+      ).run(encryptedValue, iv, authType, keyId, providerId)
+      if (updated.changes !== 1) throw new Error("target subscription credential no longer exists")
+      persistedResult.credential_imported = true
+      persistedResult.credential_fingerprint = sha256Hex(rawResult.content).slice(0, 12)
+      audit(task.created_by || null, "provider_key.import_subscription", `provider_key:${keyId}`, null, {
+        provider_id: providerId,
+        source_server_id: serverId,
+        tool,
+        auth_type: authType,
+        credential_fingerprint: persistedResult.credential_fingerprint,
+      })
+    } catch (e: any) {
+      ok = false
+      taskError = e?.message || String(e)
+      if (keyId && providerId) db.prepare("UPDATE provider_keys SET enabled=0 WHERE id=? AND provider_id=? AND encrypted_value IS NULL").run(keyId, providerId)
+    }
+    if (providerId) broadcastEvent(`provider:${providerId}:keys`, { key_id: keyId, imported: ok })
+    delete persistedResult.content
+  }
   if (ok && rawResult && typeof rawResult === "object") {
     if (task.action === "write_config") {
       if (typeof rawResult.content === "string") {
@@ -115,7 +171,7 @@ export function handleTaskResult(serverId: string, taskId: string, nonce: string
     .run(
       ok ? "done" : "failed",
       rawResult ? JSON.stringify(persistedResult) : null,
-      ok ? null : String(body.error || "task failed"),
+      ok ? null : taskError,
       now,
       task.id,
       nonce
@@ -302,15 +358,22 @@ function materializeInnerPayload(action: string, payload: any): any {
     if (!providerId || !keyId) throw new Error("provider_id and key_id are required")
 
     const key = db
-      .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.group_name, p.base_url, p.name AS provider_name
+      .prepare(`SELECT k.encrypted_value, k.iv, k.api_format, k.auth_type, k.group_name, p.base_url, p.name AS provider_name
                 FROM provider_keys k JOIN providers p ON p.id=k.provider_id
                 WHERE k.id=? AND k.provider_id=? AND k.enabled=1`)
       .get(keyId, providerId) as any
     if (!key) throw new Error("key not found")
-    if (!key.encrypted_value) throw new Error("oauth key has no secret")
+    if (!key.encrypted_value) throw new Error("credential has no encrypted value")
 
     const secret = decrypt(key.encrypted_value, key.iv)
     if (!secret) throw new Error("decrypt failed")
+    if (key.auth_type === "codex_subscription" || key.auth_type === "claude_subscription") {
+      const expectedTool = key.auth_type === "codex_subscription" ? "codex" : "claude"
+      if (tool !== expectedTool) throw new Error(`${key.auth_type} cannot be delivered to ${tool}`)
+      validateAccountCredential(tool, secret)
+      return { tool, credential_type: key.auth_type, credential_json: secret }
+    }
+    if (key.auth_type !== "apikey") throw new Error("unsupported credential type")
 
     const baseUrl = String(key.base_url || "").replace(/\/+$/, "")
     const credentials: Record<string, string> = {}

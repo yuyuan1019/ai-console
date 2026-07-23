@@ -101,10 +101,10 @@ CREATE TABLE IF NOT EXISTS providers (
 CREATE TABLE IF NOT EXISTS provider_keys (
   id TEXT PRIMARY KEY, provider_id TEXT NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
   label TEXT NOT NULL, group_name TEXT, family TEXT NOT NULL,  -- claude|codex|gemini|mixed|other
-  encrypted_value TEXT,                        -- AES-256-GCM base64(ciphertext+tag); NULL for oauth
+  encrypted_value TEXT,                        -- AES-256-GCM secret: API key or full subscription credential JSON
   iv TEXT,
   api_format TEXT,                             -- openai_responses|anthropic|gemini
-  auth_type TEXT NOT NULL DEFAULT 'apikey',    -- apikey|oauth
+  auth_type TEXT NOT NULL DEFAULT 'apikey',    -- apikey|oauth|codex_subscription|claude_subscription
   raw_config_json TEXT,                        -- 原始 settings_config, 供精确还原下发
   enabled INTEGER NOT NULL DEFAULT 1,
   last_models_refresh INTEGER,

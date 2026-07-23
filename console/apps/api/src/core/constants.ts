@@ -8,7 +8,7 @@ export const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000
 export const COOKIE_NAME = "ai_console_refresh"
 export const TARGET_PASSWORD_ALGO = "scrypt"
 
-export const AGENT_ACTIONS = ["read_config", "write_config", "list_config_backups", "restore_config_backup", "detect_tools", "set_credential", "remove_credential", "upgrade_agent", "run_test", "upgrade_tool", "manage_tool"] as const
+export const AGENT_ACTIONS = ["read_config", "read_account_credential", "write_config", "list_config_backups", "restore_config_backup", "detect_tools", "set_credential", "remove_credential", "upgrade_agent", "run_test", "upgrade_tool", "manage_tool"] as const
 
 export type Role = "admin" | "operator" | "viewer"
 

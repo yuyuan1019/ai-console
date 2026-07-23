@@ -139,6 +139,7 @@ export interface ProviderKey {
   auth_type: string
   enabled: number
   default_model_id: string | null
+  has_secret: number
 }
 
 export interface ProviderModel {
@@ -336,6 +337,7 @@ export interface BatchProgressItem {
 export interface BatchJob {
   id: string
   tool: string
+  source_type: string
   status: string
   progress: BatchProgressItem[]
   started_at: number
@@ -478,6 +480,8 @@ export const api = {
   },
   detectTools: (id: string, tool?: string | null) =>
     request<AgentTask>(`/servers/${id}/tools/detect`, { method: "POST", body: JSON.stringify({ tool }) }),
+  importAccountCredential: (id: string, input: { tool: "codex" | "claude"; provider_id: string; label: string }) =>
+    request<AgentTask & { key_id: string; auth_type: string }>(`/servers/${id}/account-credentials/import`, { method: "POST", body: JSON.stringify(input) }),
   agentManifest: () => request<AgentManifest>("/agent/manifest"),
   setCredential: (id: string, input: { tool: string; provider_id: string; key_id: string }) =>
     request<AgentTask>(`/servers/${id}/credentials/set`, { method: "POST", body: JSON.stringify(input) }),

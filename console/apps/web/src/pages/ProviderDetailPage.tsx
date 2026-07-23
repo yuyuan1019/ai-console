@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { useCreateProviderKey, useDisableProviderKey, useProvider, usePing, useRefreshModels, useUpdateProvider, useUpdateProviderKey } from "@/hooks/useProviders"
+import { useCreateProviderKey, useDisableProviderKey, useImportAccountCredential, useProvider, usePing, useRefreshModels, useUpdateProvider, useUpdateProviderKey } from "@/hooks/useProviders"
+import { useServers } from "@/hooks/useServers"
 import type { PingResult } from "@/lib/api"
 import { cn } from "@/lib/utils"
 
@@ -30,6 +31,8 @@ export function ProviderDetailPage() {
   const refreshModels = useRefreshModels(id)
   const updateProvider = useUpdateProvider(id)
   const updateKey = useUpdateProviderKey(id)
+  const importAccountCredential = useImportAccountCredential(id)
+  const { data: servers = [] } = useServers()
   const [providerName, setProviderName] = useState("")
   const [providerBaseUrl, setProviderBaseUrl] = useState("")
   const [providerModelsEndpoint, setProviderModelsEndpoint] = useState("/v1/models")
@@ -39,6 +42,8 @@ export function ProviderDetailPage() {
   const [showSettings, setShowSettings] = useState(false)
   const [label, setLabel] = useState("")
   const [apiKey, setApiKey] = useState("")
+  const [credentialKind, setCredentialKind] = useState<"apikey" | "codex_subscription" | "claude_subscription">("apikey")
+  const [sourceServerId, setSourceServerId] = useState("")
   const [family, setFamily] = useState("mixed")
   const [apiFormat, setApiFormat] = useState("")
   const [formError, setFormError] = useState<string | null>(null)
@@ -64,14 +69,26 @@ export function ProviderDetailPage() {
 
   const addKey = (e: FormEvent) => {
     e.preventDefault(); setFormError(null)
-    createKey.mutate({ label, api_key: apiKey, family, api_format: apiFormat || null }, { onSuccess: () => { setLabel(""); setApiKey(""); setFamily("mixed"); setApiFormat("") }, onError: (err) => setFormError(String(err)) })
+    const reset = () => { setLabel(""); setApiKey(""); setSourceServerId(""); setFamily("mixed"); setApiFormat("") }
+    if (credentialKind === "apikey") {
+      createKey.mutate({ label, api_key: apiKey, family, api_format: apiFormat || null }, { onSuccess: reset, onError: (err) => setFormError(String(err)) })
+      return
+    }
+    if (!sourceServerId) { setFormError("请选择已完成账户登录的来源服务器"); return }
+    importAccountCredential.mutate(
+      { serverId: sourceServerId, tool: credentialKind === "codex_subscription" ? "codex" : "claude", label },
+      { onSuccess: reset, onError: (err) => setFormError(String(err)) }
+    )
   }
   const saveProvider = (e: FormEvent) => {
     e.preventDefault(); setProviderError(null)
     updateProvider.mutate({ name: providerName, base_url: providerBaseUrl || null, models_endpoint: providerModelsEndpoint, preset: providerPreset, enabled: providerEnabled }, { onSuccess: () => setShowSettings(false), onError: (err) => setProviderError(String(err)) })
   }
   const startEditKey = (k: NonNullable<typeof provider>["keys"][number]) => { setEditingKeyId(k.id); setKeyLabel(k.label); setKeyGroupName(k.group_name || ""); setKeyFamily(k.family); setKeyApiFormat(k.api_format || ""); setKeyApiKey(""); setKeyDefaultModel(k.default_model_id || "") }
-  const saveKey = (keyId: string) => { updateKey.mutate({ keyId, input: { label: keyLabel, group_name: keyGroupName || null, family: keyFamily, api_format: keyApiFormat || null, api_key: keyApiKey || undefined, default_model_id: keyDefaultModel || null } }, { onSuccess: () => setEditingKeyId(null) }) }
+  const saveKey = (keyId: string) => {
+    const existing = provider?.keys.find((k) => k.id === keyId)
+    updateKey.mutate({ keyId, input: { label: keyLabel, group_name: keyGroupName || null, family: keyFamily, api_format: keyApiFormat || null, api_key: existing?.auth_type === "apikey" ? keyApiKey || undefined : undefined, default_model_id: keyDefaultModel || null } }, { onSuccess: () => setEditingKeyId(null) })
+  }
   const modelsForKey = (keyId: string) => provider?.models.filter((m) => !m.key_id || m.key_id === keyId) || []
 
   if (isLoading) return <p className="text-muted-foreground">加载中…</p>
@@ -110,12 +127,27 @@ export function ProviderDetailPage() {
           <Card className="bg-card"><CardContent className="p-4">
             <span className="mb-2 block text-xs font-semibold text-muted-foreground">添加新 Key / 凭据组</span>
             <form className="flex flex-wrap gap-3" onSubmit={addKey}>
-              <Input className="h-9 w-40 text-xs" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="Key 别名" required />
-              <Input className="h-9 w-56 text-xs" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API Key" autoComplete="off" />
-              <select value={family} onChange={(e) => setFamily(e.target.value)} className="h-9 rounded-md border border-input bg-background px-2 text-xs"><option value="mixed">mixed</option><option value="claude">claude</option><option value="codex">codex</option><option value="gemini">gemini</option><option value="other">other</option></select>
-              <select value={apiFormat} onChange={(e) => setApiFormat(e.target.value)} className="h-9 rounded-md border border-input bg-background px-2 text-xs"><option value="">默认协议</option><option value="openai_responses">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option></select>
-              <Button className="h-9 text-xs" type="submit" disabled={createKey.isPending}>{createKey.isPending ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Plus className="mr-1 h-3.5 w-3.5" />}添加</Button>
+              <Input className="h-9 w-40 text-xs" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="凭据别名" required />
+              <select value={credentialKind} onChange={(e) => { const value = e.target.value as typeof credentialKind; setCredentialKind(value); if (value === "codex_subscription") setFamily("codex"); if (value === "claude_subscription") setFamily("claude") }} className="h-9 rounded-md border border-input bg-background px-2 text-xs">
+                <option value="apikey">API Key</option>
+                <option value="codex_subscription">Codex 订阅登录</option>
+                <option value="claude_subscription">Claude 订阅登录</option>
+              </select>
+              {credentialKind === "apikey" ? (
+                <>
+                  <Input className="h-9 w-56 text-xs" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="API Key" autoComplete="off" required />
+                  <select value={family} onChange={(e) => setFamily(e.target.value)} className="h-9 rounded-md border border-input bg-background px-2 text-xs"><option value="mixed">mixed</option><option value="claude">claude</option><option value="codex">codex</option><option value="gemini">gemini</option><option value="other">other</option></select>
+                  <select value={apiFormat} onChange={(e) => setApiFormat(e.target.value)} className="h-9 rounded-md border border-input bg-background px-2 text-xs"><option value="">默认协议</option><option value="openai_responses">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option></select>
+                </>
+              ) : (
+                <select value={sourceServerId} onChange={(e) => setSourceServerId(e.target.value)} className="h-9 min-w-56 rounded-md border border-input bg-background px-2 text-xs" required>
+                  <option value="">选择已登录的来源服务器…</option>
+                  {servers.map((server) => <option key={server.id} value={server.id}>{server.name} ({server.status})</option>)}
+                </select>
+              )}
+              <Button className="h-9 text-xs" type="submit" disabled={createKey.isPending || importAccountCredential.isPending}>{createKey.isPending || importAccountCredential.isPending ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Plus className="mr-1 h-3.5 w-3.5" />}{credentialKind === "apikey" ? "添加" : "从服务器导入"}</Button>
             </form>
+            {credentialKind !== "apikey" && <p className="mt-2 text-xs text-muted-foreground">请先在来源机器运行 {credentialKind === "codex_subscription" ? <code>codex login</code> : <code>claude auth login</code>}。登录文件只经加密连接读取，并以 AES-256-GCM 保存。</p>}
             {formError && <p className="mt-2 text-xs text-destructive">{formError}</p>}
           </CardContent></Card>
           {refreshMessage && <div className="rounded-md bg-emerald-950/20 px-3 py-2 text-xs text-emerald-600 dark:text-emerald-400">{refreshMessage}</div>}
@@ -128,20 +160,20 @@ export function ProviderDetailPage() {
                       {editingKeyId === k.id ? (
                         <div className="grid flex-1 gap-2 md:grid-cols-[1fr_1.5fr_1fr_100px_120px_140px]">
                           <Input className="h-8 text-xs" value={keyLabel} onChange={(e) => setKeyLabel(e.target.value)} placeholder="别名" />
-                          <Input className="h-8 text-xs" value={keyApiKey} onChange={(e) => setKeyApiKey(e.target.value)} placeholder="•••••••• (留空不修改)" autoComplete="off" />
+                          <Input className="h-8 text-xs" value={keyApiKey} onChange={(e) => setKeyApiKey(e.target.value)} placeholder={k.auth_type === "apikey" ? "•••••••• (留空不修改)" : "订阅凭据不可手工编辑"} autoComplete="off" disabled={k.auth_type !== "apikey"} />
                           <Input className="h-8 text-xs" value={keyGroupName} onChange={(e) => setKeyGroupName(e.target.value)} placeholder="分组名" />
                           <select value={keyFamily} onChange={(e) => setKeyFamily(e.target.value)} className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"><option value="mixed">mixed</option><option value="claude">claude</option><option value="codex">codex</option><option value="gemini">gemini</option><option value="other">other</option></select>
                           <select value={keyApiFormat} onChange={(e) => setKeyApiFormat(e.target.value)} className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"><option value="">默认</option><option value="openai_responses">openai</option><option value="anthropic">anthropic</option><option value="gemini">gemini</option></select>
                           <select value={keyDefaultModel} onChange={(e) => setKeyDefaultModel(e.target.value)} className="h-8 w-full rounded-md border border-input bg-background px-2 text-xs"><option value="">默认模型</option>{modelsForKey(k.id).map((m) => (<option key={m.id} value={m.model_id}>{m.model_id}</option>))}</select>
                         </div>
-                      ) : (<><span className="font-medium text-sm">{k.label}</span>{k.group_name && <span className="text-[11px] text-muted-foreground">({k.group_name})</span>}<Badge variant="secondary" className="text-[10px] capitalize">{k.family}</Badge>{k.api_format && <Badge variant="outline" className="text-[10px]">{k.api_format}</Badge>}{k.auth_type === "oauth" && <Badge variant="outline" className="text-[10px]">OAuth</Badge>}{k.default_model_id && <Badge variant="outline" className="text-[10px] bg-amber-900/20 text-amber-400 border-amber-700/30">默认 {k.default_model_id}</Badge>}</>)}
+                      ) : (<><span className="font-medium text-sm">{k.label}</span>{k.group_name && <span className="text-[11px] text-muted-foreground">({k.group_name})</span>}<Badge variant="secondary" className="text-[10px] capitalize">{k.family}</Badge>{k.api_format && <Badge variant="outline" className="text-[10px]">{k.api_format}</Badge>}{k.auth_type === "codex_subscription" && <Badge variant="outline" className="text-[10px]">Codex 订阅</Badge>}{k.auth_type === "claude_subscription" && <Badge variant="outline" className="text-[10px]">Claude 订阅</Badge>}{k.auth_type === "oauth" && <Badge variant="outline" className="text-[10px]">OAuth</Badge>}{!k.has_secret && <Badge variant="destructive" className="text-[10px]">导入中/失败</Badge>}{k.default_model_id && <Badge variant="outline" className="text-[10px] bg-amber-900/20 text-amber-400 border-amber-700/30">默认 {k.default_model_id}</Badge>}</>)}
                     </div>
                   </div>
                   <div className="flex shrink-0 flex-wrap items-center gap-2">
                     {editingKeyId === k.id ? (<><Button size="sm" className="h-8 text-xs" disabled={updateKey.isPending} onClick={() => saveKey(k.id)}>{updateKey.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Save className="mr-1 h-3 w-3" />}保存</Button><Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => setEditingKeyId(null)}><X className="mr-1 h-3 w-3" />取消</Button></>) : (<>
                       <select value={selectedModels[k.id] || modelsForKey(k.id)[0]?.model_id || ""} onChange={(e) => setSelectedModels((prev) => ({ ...prev, [k.id]: e.target.value }))} className="h-8 max-w-48 rounded-md border border-input bg-background px-2 text-xs">{modelsForKey(k.id).length === 0 ? <option value="">暂无模型</option> : modelsForKey(k.id).map((m) => (<option key={m.id} value={m.model_id}>{m.model_id}</option>))}</select>
-                      <PingButton providerId={provider.id} keyId={k.id} modelId={selectedModels[k.id] || modelsForKey(k.id)[0]?.model_id} disabled={modelsForKey(k.id).length === 0} />
-                      <Button size="sm" variant="outline" className="h-8 text-xs" disabled={refreshModels.isPending} onClick={() => { setRefreshMessage(null); refreshModels.mutate(k.id, { onSuccess: (r) => setRefreshMessage(`模型刷新完成：新增 ${r.created}、更新 ${r.updated}、下架 ${r.removed || 0}，共 ${r.total} 个`), onError: (e) => setRefreshMessage(`模型刷新失败：${String(e)}`) }) }}>{refreshModels.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}拉取模型</Button>
+                      <PingButton providerId={provider.id} keyId={k.id} modelId={selectedModels[k.id] || modelsForKey(k.id)[0]?.model_id} disabled={k.auth_type !== "apikey" || modelsForKey(k.id).length === 0} />
+                      <Button size="sm" variant="outline" className="h-8 text-xs" disabled={k.auth_type !== "apikey" || refreshModels.isPending} onClick={() => { setRefreshMessage(null); refreshModels.mutate(k.id, { onSuccess: (r) => setRefreshMessage(`模型刷新完成：新增 ${r.created}、更新 ${r.updated}、下架 ${r.removed || 0}，共 ${r.total} 个`), onError: (e) => setRefreshMessage(`模型刷新失败：${String(e)}`) }) }}>{refreshModels.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <RefreshCw className="mr-1 h-3 w-3" />}拉取模型</Button>
                       <Button size="sm" variant="ghost" className="h-8 text-xs" onClick={() => startEditKey(k)}><Pencil className="mr-1 h-3 w-3" />编辑</Button>
                       <Button size="sm" variant="ghost" className="h-8 text-xs text-destructive hover:bg-destructive/10" disabled={disableKey.isPending} onClick={() => { if (confirm(`禁用凭据「${k.label}」？`)) disableKey.mutate(k.id) }}><Trash2 className="mr-1 h-3 w-3" />禁用</Button>
                     </>)}

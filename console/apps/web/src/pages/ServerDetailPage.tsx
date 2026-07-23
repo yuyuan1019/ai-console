@@ -118,22 +118,24 @@ export function ServerDetailPage() {
   const { data: credProviderDetail } = useProvider(credProviderId || undefined, credKeyId || undefined)
   const refreshModelsMut = useRefreshModels(credProviderId || undefined)
   const refreshedCredKeyRef = useRef<string>("")
+  const selectedCredKey = credProviderDetail?.keys.find((key) => key.id === credKeyId)
+  const isSubscriptionCredential = selectedCredKey?.auth_type === "codex_subscription" || selectedCredKey?.auth_type === "claude_subscription"
 
   // ponytail: 与 BatchPage 一致——选了 key 但该 key 无模型时自动刷新一次。刷新后
   // 仍为空/失败 → noCredModels=true，提醒并禁用「下发配置」（否则后端会 400
   // "no model available"，这里前端先拦）。
   useEffect(() => {
-    if (!credProviderId || !credKeyId) { refreshedCredKeyRef.current = ""; return }
+    if (!credProviderId || !credKeyId || isSubscriptionCredential) { refreshedCredKeyRef.current = ""; return }
     if (refreshedCredKeyRef.current === credKeyId) return
     if (credProviderDetail && credProviderDetail.models.length === 0 && !refreshModelsMut.isPending) {
       refreshedCredKeyRef.current = credKeyId
       refreshModelsMut.mutate(credKeyId)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [credProviderId, credKeyId, credProviderDetail])
+  }, [credProviderId, credKeyId, credProviderDetail, isSubscriptionCredential])
 
-  const isRefreshingCredModels = !!credProviderId && !!credKeyId && refreshModelsMut.isPending
-  const credRefreshDone = !!credKeyId && refreshedCredKeyRef.current === credKeyId && !refreshModelsMut.isPending
+  const isRefreshingCredModels = !isSubscriptionCredential && !!credProviderId && !!credKeyId && refreshModelsMut.isPending
+  const credRefreshDone = !isSubscriptionCredential && !!credKeyId && refreshedCredKeyRef.current === credKeyId && !refreshModelsMut.isPending
   const noCredModels = credRefreshDone && (credProviderDetail?.models || []).length === 0
   const [showUninstall, setShowUninstall] = useState(false)
   const [uninstallCopied, setUninstallCopied] = useState(false)
@@ -193,12 +195,18 @@ export function ServerDetailPage() {
     if (tool === "hermes") return true
     return false
   })
-  const credKeys = (credProviderDetail?.keys || []).filter((k) => k.enabled === 1)
+  const credKeys = (credProviderDetail?.keys || []).filter((k) => {
+    if (k.enabled !== 1) return false
+    if (k.auth_type === "codex_subscription") return tool === "codex"
+    if (k.auth_type === "claude_subscription") return tool === "claude"
+    return true
+  })
   const credKeyPreview = useMemo((): Record<string, string> => {
     const k = credKeys.find((x) => x.id === credKeyId)
     if (!k) return {}
     const baseUrl = (credProviderDetail?.base_url || "").replace(/\/+$/, "")
     if (tool === "codex") {
+      if (k.auth_type === "codex_subscription") return { "订阅登录文件": "~/.codex/auth.json", "类型": "OpenAI Codex 账户登录" }
       return {
         "配置文件": "~/.codex/config.toml",
         "凭据文件": "~/.codex/auth.json (OPENAI_API_KEY)",
@@ -206,6 +214,7 @@ export function ServerDetailPage() {
       }
     }
     if (tool === "claude") {
+      if (k.auth_type === "claude_subscription") return { "订阅登录文件": "~/.claude/.credentials.json", "类型": "Anthropic Claude 账户登录" }
       return {
         "配置文件": "~/.claude/settings.json",
         "字段": "env.ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL",
@@ -519,11 +528,11 @@ export function ServerDetailPage() {
                   <Button
                     size="sm"
                     variant="outline"
-                    disabled={setCredential.isPending || !credProviderId || !credKeyId || noCredModels}
+                    disabled={setCredential.isPending || !credProviderId || !credKeyId || !selectedCredKey?.has_secret || noCredModels}
                     onClick={() => setCredential.mutate({ tool, provider_id: credProviderId, key_id: credKeyId })}
                   >
                     {setCredential.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Key className="mr-1 h-3 w-3" />}
-                    下发配置
+                    {isSubscriptionCredential ? "下发订阅登录" : "下发配置"}
                   </Button>
                   <Button
                     size="sm"
@@ -576,7 +585,7 @@ export function ServerDetailPage() {
                     disabled={!credProviderDetail}
                   >
                     <option value="">选择 Key…</option>
-                    {credKeys.map((k) => <option key={k.id} value={k.id}>{k.label} ({k.family})</option>)}
+                    {credKeys.map((k) => <option key={k.id} value={k.id}>{k.label} ({k.auth_type === "codex_subscription" ? "Codex 订阅" : k.auth_type === "claude_subscription" ? "Claude 订阅" : k.family}){k.has_secret ? "" : " · 未就绪"}</option>)}
                   </select>
                 </div>
                 {isRefreshingCredModels && (

@@ -68,8 +68,10 @@ type wsCmd struct {
 }
 
 type setCredPayload struct {
-	Tool        string            `json:"tool"`
-	Credentials map[string]string `json:"credentials"`
+	Tool           string            `json:"tool"`
+	Credentials    map[string]string `json:"credentials"`
+	CredentialType string            `json:"credential_type"`
+	CredentialJSON string            `json:"credential_json"`
 }
 
 type removeCredPayload struct {
@@ -288,7 +290,7 @@ func (a *Agent) Run(ctx context.Context) error {
 //   - each tool's config file (~/.codex/config.toml, ~/.claude/settings.json,
 //     ~/.gemini/settings.json, ~/.config/opencode/opencode.json)
 //     and its parent directory                         → 0600 / 0700
-//   - ~/.codex/auth.json                               → 0600
+//   - ~/.codex/auth.json, ~/.claude/.credentials.json → 0600
 //   - .<basename>.bak.* files inside each config dir   → 0600
 //
 // The purpose is to close the historical 0644 permission surface without
@@ -367,8 +369,9 @@ func (a *Agent) enforceOwnedPathPermissions() {
 		chmodBackups(dir)
 	}
 
-	// Codex secret file lives next to config.toml.
+	// Account-login secret files live next to each tool's config.
 	chmodFile(a.codexAuthFile(), 0600)
+	chmodFile(a.claudeAccountCredentialFile(), 0600)
 }
 
 func (a *Agent) connectWS(ctx context.Context) error {
@@ -534,7 +537,12 @@ func (a *Agent) pollRest(ctx context.Context) {
 	}
 	result, errStr := a.handleCmd(task.Action, task.Payload)
 	ok := errStr == ""
-	a.journalPut(task.ID, task.Action, ok, result, errStr)
+	// Account-login documents contain refresh tokens. The read is idempotent,
+	// so never cache its plaintext result in task-journal.json; if reporting
+	// fails, a re-delivery safely reads the source file again.
+	if task.Action != "read_account_credential" {
+		a.journalPut(task.ID, task.Action, ok, result, errStr)
+	}
 	a.restReport(ctx, task.ID, task.Nonce, ok, result, errStr)
 }
 
@@ -654,7 +662,11 @@ func (a *Agent) handleCmdWSWithLease(ctx context.Context, conn *websocket.Conn, 
 	ok := errStr == ""
 	// ponytail (BUG-05): persist to journal BEFORE reporting. If the network
 	// drops between here and the ack, the redelivery path finds the entry.
-	a.journalPut(cmd.ID, cmd.Action, ok, result, errStr)
+	// Exception: account credential reads are idempotent and contain refresh
+	// tokens, so persisting their result would create a second plaintext copy.
+	if cmd.Action != "read_account_credential" {
+		a.journalPut(cmd.ID, cmd.Action, ok, result, errStr)
+	}
 	a.sendResult(conn, cmd, ok, result, errStr)
 }
 
@@ -708,6 +720,8 @@ func (a *Agent) handleCmd(action string, payload []byte) (map[string]interface{}
 		return a.handleRemoveCred(payload)
 	case "read_config":
 		return a.handleReadConfig(payload)
+	case "read_account_credential":
+		return a.handleReadAccountCredential(payload)
 	case "write_config":
 		return a.handleWriteConfig(payload)
 	case "list_config_backups":
@@ -751,6 +765,77 @@ func (a *Agent) codexAuthFile() string {
 	return filepath.Join(home, ".codex", "auth.json")
 }
 
+func (a *Agent) claudeAccountCredentialFile() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude", ".credentials.json")
+}
+
+func validateAccountCredential(tool string, data []byte) error {
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		return fmt.Errorf("credential is not valid JSON: %v", err)
+	}
+	stringField := func(values map[string]interface{}, key string) string {
+		value, _ := values[key].(string)
+		return strings.TrimSpace(value)
+	}
+	if tool == "codex" {
+		tokens, ok := root["tokens"].(map[string]interface{})
+		if !ok || stringField(tokens, "access_token") == "" || stringField(tokens, "refresh_token") == "" {
+			return fmt.Errorf("Codex auth.json has no account access/refresh tokens")
+		}
+		return nil
+	}
+	if tool == "claude" {
+		oauth, ok := root["claudeAiOauth"].(map[string]interface{})
+		if !ok || stringField(oauth, "accessToken") == "" || stringField(oauth, "refreshToken") == "" {
+			return fmt.Errorf("Claude credentials have no subscription access/refresh tokens")
+		}
+		return nil
+	}
+	return fmt.Errorf("account credentials are unsupported for %s", tool)
+}
+
+func (a *Agent) handleReadAccountCredential(payload []byte) (map[string]interface{}, string) {
+	var p struct {
+		Tool string `json:"tool"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, fmt.Sprintf("bad payload: %v", err)
+	}
+	var path string
+	if p.Tool == "codex" {
+		path = a.codexAuthFile()
+	} else if p.Tool == "claude" {
+		path = a.claudeAccountCredentialFile()
+	} else {
+		return nil, "account credential import supports only codex and claude"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil && p.Tool == "claude" && runtime.GOOS == "darwin" {
+		// Claude Code stores subscription credentials in Login Keychain on some
+		// macOS versions instead of ~/.claude/.credentials.json.
+		data, err = exec.Command("security", "find-generic-password", "-s", "Claude Code-credentials", "-w").Output()
+		if err == nil {
+			path = "macOS Keychain: Claude Code-credentials"
+		}
+	}
+	if err != nil {
+		loginCommand := "codex login"
+		if p.Tool == "claude" {
+			loginCommand = "claude auth login"
+		}
+		return nil, fmt.Sprintf("read %s: %v; log in with `%s` on this machine first", path, err, loginCommand)
+	}
+	if len(data) > 1024*1024 {
+		return nil, "account credential file exceeds 1 MiB"
+	}
+	if err := validateAccountCredential(p.Tool, data); err != nil {
+		return nil, err.Error()
+	}
+	return map[string]interface{}{"tool": p.Tool, "path": path, "format": "json", "content": string(data)}, ""
+}
+
 func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 	var p setCredPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -765,6 +850,37 @@ func (a *Agent) handleSetCred(payload []byte) (map[string]interface{}, string) {
 		// These tools keep provider credentials inside their native config file;
 		// write_config owns delivery and no shell credential file is needed.
 		return map[string]interface{}{"format": "inline-config", "keys": []string{}}, ""
+	}
+
+	if p.CredentialType != "" {
+		expected := map[string]string{"codex": "codex_subscription", "claude": "claude_subscription"}[p.Tool]
+		if expected == "" || p.CredentialType != expected {
+			return nil, "credential type does not match tool"
+		}
+		data := []byte(p.CredentialJSON)
+		if err := validateAccountCredential(p.Tool, data); err != nil {
+			return nil, err.Error()
+		}
+		path := a.codexAuthFile()
+		if p.Tool == "claude" {
+			path = a.claudeAccountCredentialFile()
+		}
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			return nil, fmt.Sprintf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		_ = os.Chmod(filepath.Dir(path), 0700)
+		backup := ""
+		if existing, err := os.ReadFile(path); err == nil {
+			backupPath := backupFilePath(path)
+			if err := writeFileAtomic(backupPath, existing, 0600); err != nil {
+				return nil, fmt.Sprintf("backup %s: %v", backupPath, err)
+			}
+			backup = filepath.Base(backupPath)
+		}
+		if err := writeFileAtomic(path, data, 0600); err != nil {
+			return nil, fmt.Sprintf("write %s: %v", path, err)
+		}
+		return map[string]interface{}{"path": path, "format": "subscription-json", "credential_type": p.CredentialType, "backup": backup}, ""
 	}
 
 	if p.Tool == "codex" {
@@ -841,6 +957,15 @@ func (a *Agent) handleRemoveCred(payload []byte) (map[string]interface{}, string
 				return nil, fmt.Sprintf("remove %s: %v", path, err)
 			}
 			removed = append(removed, path)
+		}
+		if p.Tool == "claude" {
+			accountPath := a.claudeAccountCredentialFile()
+			if _, err := os.Stat(accountPath); err == nil {
+				if err := os.Remove(accountPath); err != nil {
+					return nil, fmt.Sprintf("remove %s: %v", accountPath, err)
+				}
+				removed = append(removed, accountPath)
+			}
 		}
 	}
 
