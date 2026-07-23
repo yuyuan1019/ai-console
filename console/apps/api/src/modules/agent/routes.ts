@@ -157,7 +157,26 @@ export function handleTaskResult(serverId: string, taskId: string, nonce: string
       ).run(serverId, toolName, tool.installed === false || tool.installed === 0 ? 0 : 1, tool.version || null, tool.path || null, now)
     }
   }
+  if (ok && task.action === "manage_tool" && rawResult) {
+    const payload = JSON.parse(task.payload_json || "{}")
+    const tool = String(payload.tool || "")
+    if (["codex", "claude", "gemini", "opencode", "pi"].includes(tool) && typeof rawResult.installed === "boolean") {
+      db.prepare(
+        `INSERT INTO tools(server_id,name,installed,version,path,detected_at)
+         VALUES(?,?,?,?,?,?)
+         ON CONFLICT(server_id,name) DO UPDATE SET installed=excluded.installed,version=excluded.version,path=excluded.path,detected_at=excluded.detected_at`
+      ).run(
+        serverId,
+        tool,
+        rawResult.installed ? 1 : 0,
+        rawResult.new_version ? String(rawResult.new_version).slice(0, 120) : null,
+        rawResult.path ? String(rawResult.path).slice(0, 1024) : null,
+        now
+      )
+    }
+  }
   if (ok && task.action === "upgrade_tool" && rawResult) {
+    // Kept for tasks queued by an older API while it is being rolled out.
     const payload = JSON.parse(task.payload_json || "{}")
     const tool = String(payload.tool || "codex")
     if (rawResult.new_version) {

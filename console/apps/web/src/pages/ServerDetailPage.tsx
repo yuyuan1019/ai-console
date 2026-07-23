@@ -6,7 +6,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useLatestConfig, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useUpdateServer } from "@/hooks/useServers"
+import { useAgentManifest, useCreateEnrollToken, useDeleteServer, useLatestConfig, useListConfigBackups, useReadServerConfig, useRestoreConfigBackup, useServer, useServerTasks, useWriteServerConfig, useDetectTools, useSetCredential, useRemoveCredential, useUpgradeAgent, useManageTool, useUpdateServer } from "@/hooks/useServers"
 import { useProviders, useProvider, useRefreshModels } from "@/hooks/useProviders"
 
 function formatTs(value: number | null) {
@@ -79,6 +79,7 @@ export function ServerDetailPage() {
   const setCredential = useSetCredential(id)
   const removeCredential = useRemoveCredential(id)
   const upgradeAgent = useUpgradeAgent(id)
+  const manageTool = useManageTool(id)
   // ponytail (BUG-08): "重装/恢复此机器" mints a one-shot replace-mode enroll
   // token bound to this server's id. The new agent install generates a fresh
   // agent_instance_id; server-side enroll validates target_server_id matches
@@ -409,10 +410,58 @@ export function ServerDetailPage() {
               </div>
               <div className="space-y-1 pt-2">
                 {server.tools.map((t) => (
-                  <div key={t.name} className="flex items-center justify-between rounded-md border border-border p-2 text-xs">
+                  <div key={t.name} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border p-2 text-xs">
                     <div>
                       <div className="font-medium capitalize">{t.name} {t.installed ? "" : "（未安装）"}</div>
                       <div className="text-muted-foreground">version: {t.version || "—"} · path: {t.path || "—"}</div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      {t.installed ? (
+                        <>
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs"
+                            disabled={manageTool.isPending}
+                            onClick={() => {
+                              if (confirm(`升级 ${server.name} 上的 ${t.name}？将通过 npm 全局安装最新版本。`)) {
+                                manageTool.mutate({ tool: t.name, action: "upgrade" })
+                              }
+                            }}
+                          >
+                            {manageTool.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <PackageOpen className="mr-1 h-3 w-3" />}
+                            升级
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-7 text-xs text-destructive"
+                            disabled={manageTool.isPending}
+                            onClick={() => {
+                              if (confirm(`卸载 ${server.name} 上的 ${t.name} CLI？将执行 npm uninstall --global；不会删除该工具的配置或已下发的凭据。`)) {
+                                manageTool.mutate({ tool: t.name, action: "uninstall" })
+                              }
+                            }}
+                          >
+                            <Trash2 className="mr-1 h-3 w-3" /> 卸载
+                          </Button>
+                        </>
+                      ) : (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-xs"
+                          disabled={manageTool.isPending}
+                          onClick={() => {
+                            if (confirm(`在 ${server.name} 上安装 ${t.name} CLI？将通过 npm 全局安装最新版本。`)) {
+                              manageTool.mutate({ tool: t.name, action: "install" })
+                            }
+                          }}
+                        >
+                          {manageTool.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Plus className="mr-1 h-3 w-3" />}
+                          安装
+                        </Button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -442,7 +491,7 @@ export function ServerDetailPage() {
                     }}
                   >
                     {removeCredential.isPending ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Trash2 className="mr-1 h-3 w-3" />}
-                    卸载 Key
+                    清除配置
                   </Button>
                 </div>
               </div>

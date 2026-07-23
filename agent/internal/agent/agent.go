@@ -720,6 +720,8 @@ func (a *Agent) handleCmd(action string, payload []byte) (map[string]interface{}
 		return a.handleUpgradeAgent(payload)
 	case "upgrade_tool":
 		return a.handleUpgradeTool(payload)
+	case "manage_tool":
+		return a.handleManageTool(payload)
 	}
 	return nil, fmt.Sprintf("unknown action: %s", action)
 }
@@ -1244,16 +1246,115 @@ func (a *Agent) handleUpgradeAgent(_ []byte) (map[string]interface{}, string) {
 	}, ""
 }
 
+// npmToolPackages is deliberately an allowlist: a console task can only
+// manage one of the CLI packages we support, never an arbitrary npm package.
+var npmToolPackages = map[string]string{
+	"codex":    "@openai/codex",
+	"claude":   "@anthropic-ai/claude-code",
+	"gemini":   "@google/gemini-cli",
+	"opencode": "opencode-ai",
+	"pi":       "@earendil-works/pi-coding-agent",
+}
+
+var npmVersionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+func installedTool(tool string) (path, version string) {
+	path, _ = exec.LookPath(tool)
+	if path == "" {
+		return "", ""
+	}
+	out, err := exec.Command(tool, "--version").CombinedOutput()
+	if err == nil {
+		version = firstLine(string(out))
+	}
+	return path, version
+}
+
+func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string) {
+	var p struct {
+		Tool    string `json:"tool"`
+		Action  string `json:"action"`
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, fmt.Sprintf("invalid tool management payload: %v", err)
+	}
+	pkg, supported := npmToolPackages[p.Tool]
+	if !supported {
+		return nil, "unsupported tool"
+	}
+	if p.Action != "install" && p.Action != "upgrade" && p.Action != "uninstall" {
+		return nil, "unsupported tool action"
+	}
+	if p.Version != "" && !npmVersionRe.MatchString(p.Version) {
+		return nil, "invalid version or npm tag"
+	}
+	if p.Action == "uninstall" && p.Version != "" {
+		return nil, "version is not supported for uninstall"
+	}
+
+	oldPath, oldVersion := installedTool(p.Tool)
+	result := map[string]interface{}{
+		"tool":        p.Tool,
+		"action":      p.Action,
+		"package":     pkg,
+		"old_version": oldVersion,
+		"old_path":    oldPath,
+	}
+	npm, err := exec.LookPath("npm")
+	if err != nil {
+		return result, "npm was not found in the agent PATH; install Node.js/npm first"
+	}
+
+	args := []string{}
+	if p.Action == "uninstall" {
+		args = []string{"uninstall", "--global", pkg}
+	} else {
+		packageSpec := pkg
+		if p.Version != "" {
+			packageSpec += "@" + p.Version
+		}
+		// `npm install --global` also upgrades an existing global package.
+		args = []string{"install", "--global", packageSpec}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, npm, args...)
+	output, runErr := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return result, "npm command timed out after 10 minutes"
+	}
+	if runErr != nil {
+		// Do not return npm output: npm configuration/output can contain a
+		// private registry URL or token. The task error still identifies action.
+		return result, fmt.Sprintf("npm %s failed: %v", p.Action, runErr)
+	}
+
+	path, version := installedTool(p.Tool)
+	result["installed"] = path != ""
+	result["path"] = path
+	result["new_version"] = version
+	result["output_bytes"] = len(output)
+	if p.Action == "uninstall" && path != "" {
+		result["note"] = "npm removed its global package, but a command with this name remains on PATH"
+	}
+	return result, ""
+}
+
 func (a *Agent) handleUpgradeTool(payload []byte) (map[string]interface{}, string) {
+	// Compatibility for a task sent by a pre-tool-management console.
 	var p struct {
 		Tool    string `json:"tool"`
 		Version string `json:"version"`
 	}
-	json.Unmarshal(payload, &p)
-	out, _ := exec.Command(p.Tool, "--version").CombinedOutput()
-	// bug 17: 诚实优于假成功——本 agent 从不真正下载/安装工具，所以返回失败，
-	// 而非把请求的 Version 当 new_version 回报（控制台会误记为「已升级到 X」）。
-	return map[string]interface{}{"tool": p.Tool, "old_version": firstLine(string(out))}, "upgrade_tool not implemented"
+	if err := json.Unmarshal(payload, &p); err != nil {
+		return nil, fmt.Sprintf("invalid upgrade payload: %v", err)
+	}
+	managed, errMsg := json.Marshal(map[string]string{"tool": p.Tool, "action": "upgrade", "version": p.Version})
+	if errMsg != nil {
+		return nil, fmt.Sprintf("build upgrade payload: %v", errMsg)
+	}
+	return a.handleManageTool(managed)
 }
 
 // --- helpers ---
@@ -1300,15 +1401,21 @@ func (a *Agent) ensureCredSourcing() {
 func shellEscape(s string) string { return strings.ReplaceAll(s, "'", "'\"'\"'") }
 func mapKeys(m map[string]string) []string {
 	keys := make([]string, 0, len(m))
-	for k := range m { keys = append(keys, k) }
+	for k := range m {
+		keys = append(keys, k)
+	}
 	return keys
 }
 func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 { return s[:i] }
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
 	return s
 }
 func formatForTool(tool string) string {
-	if tool == "codex" { return "toml" }
+	if tool == "codex" {
+		return "toml"
+	}
 	return "json"
 }
 func fingerprint(s string) string {

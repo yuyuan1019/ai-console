@@ -186,13 +186,23 @@ export function useUpgradeAgent(id: string | undefined) {
   })
 }
 
-export function useUpgradeTool(id: string | undefined) {
+export function useManageTool(id: string | undefined) {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (input: { tool: string; version?: string }) => api.upgradeTool(id!, input),
+    mutationFn: (input: { tool: string; action: "install" | "upgrade" | "uninstall"; version?: string }) => api.manageTool(id!, input),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["server", id, "tasks"] })
       void queryClient.invalidateQueries({ queryKey: ["server", id] })
     },
   })
+}
+
+// Compatibility export for code outside this page that still needs upgrade-only.
+export function useUpgradeTool(id: string | undefined) {
+  const manageTool = useManageTool(id)
+  return {
+    ...manageTool,
+    mutate: (input: { tool: string; version?: string }, options?: Parameters<typeof manageTool.mutate>[1]) =>
+      manageTool.mutate({ ...input, action: "upgrade" }, options),
+  }
 }

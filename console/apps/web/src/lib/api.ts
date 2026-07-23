@@ -478,6 +478,9 @@ export const api = {
   removeCredential: (id: string, input: { tool: string; provider_id?: string; key_id?: string }) =>
     request<AgentTask>(`/servers/${id}/credentials/remove`, { method: "POST", body: JSON.stringify(input) }),
   upgradeAgent: (id: string) => request<AgentTask>(`/servers/${id}/agent/upgrade`, { method: "POST", body: JSON.stringify({}) }),
+  manageTool: (id: string, input: { tool: string; action: "install" | "upgrade" | "uninstall"; version?: string }) =>
+    request<AgentTask>(`/servers/${id}/tools/manage`, { method: "POST", body: JSON.stringify(input) }),
+  // Kept for integrations still calling the former upgrade-only endpoint.
   upgradeTool: (id: string, input: { tool: string; version?: string }) =>
     request<AgentTask>(`/servers/${id}/tools/upgrade`, { method: "POST", body: JSON.stringify(input) }),
   changePassword: (oldPassword: string, newPassword: string) =>

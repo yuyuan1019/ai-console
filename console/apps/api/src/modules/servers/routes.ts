@@ -295,6 +295,26 @@ export function registerServersRoutes(app: FastifyInstance) {
     }
   )
 
+  app.post<{ Params: { id: string }; Body: { tool?: string; action?: string; version?: string } }>(
+    "/api/servers/:id/tools/manage",
+    async (req, reply) => {
+      const user = (req as any).auth as AuthUser
+      const server = db.prepare("SELECT id FROM servers WHERE id=?").get(req.params.id)
+      if (!server) return reply.code(404).send({ error: "not found" })
+      const tool = String(req.body?.tool || "").trim()
+      const action = String(req.body?.action || "").trim()
+      const version = req.body?.version ? String(req.body.version).trim() : undefined
+      if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
+      if (!["install", "upgrade", "uninstall"].includes(action)) return reply.code(400).send({ error: "unsupported tool action" })
+      // The agent passes this only as an npm package version/tag, never to a shell.
+      // Limit it here too, so the task queue cannot become a generic npm installer.
+      if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: "invalid version or npm tag" })
+      if (action === "uninstall" && version) return reply.code(400).send({ error: "version is not supported for uninstall" })
+      return reply.code(201).send(createAgentTask(req.params.id, user.id, "manage_tool", { tool, action, version }))
+    }
+  )
+
+  // Compatibility endpoint for callers from before install/uninstall support.
   app.post<{ Params: { id: string }; Body: { tool?: string; version?: string } }>(
     "/api/servers/:id/tools/upgrade",
     async (req, reply) => {
@@ -304,7 +324,8 @@ export function registerServersRoutes(app: FastifyInstance) {
       const tool = String(req.body?.tool || "codex").trim()
       const version = req.body?.version ? String(req.body.version).trim() : undefined
       if (!["codex", "claude", "gemini", "opencode", "pi"].includes(tool)) return reply.code(400).send({ error: "unsupported tool" })
-      return reply.code(201).send(createAgentTask(req.params.id, user.id, "upgrade_tool", { tool, version }))
+      if (version && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version)) return reply.code(400).send({ error: "invalid version or npm tag" })
+      return reply.code(201).send(createAgentTask(req.params.id, user.id, "manage_tool", { tool, action: "upgrade", version }))
     }
   )
 
