@@ -1277,6 +1277,46 @@ func canonicalSemver(value string) (string, bool) {
 	return strings.ToLower(match[1]), true
 }
 
+func resolvedExecutablePath(path string) string {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return path
+	}
+	return resolved
+}
+
+func openCodeInstallMethod(path string) string {
+	normalized := strings.ToLower(filepath.ToSlash(resolvedExecutablePath(path)))
+	switch {
+	case strings.Contains(normalized, "/pnpm/") || strings.Contains(normalized, "/.local/share/pnpm/"):
+		return "pnpm"
+	case strings.Contains(normalized, "/.bun/"):
+		return "bun"
+	case strings.Contains(normalized, "/homebrew/") || strings.Contains(normalized, "/.linuxbrew/") || strings.Contains(normalized, "/cellar/opencode/"):
+		return "brew"
+	case strings.Contains(normalized, "/node_modules/opencode-ai/"):
+		return "npm"
+	case strings.Contains(normalized, "/.opencode/bin/") || strings.Contains(normalized, "/.local/bin/"):
+		return "curl"
+	default:
+		return ""
+	}
+}
+
+func openCodeNpmPrefix(path string) string {
+	resolved := filepath.ToSlash(resolvedExecutablePath(path))
+	const marker = "/lib/node_modules/opencode-ai/"
+	index := strings.Index(strings.ToLower(resolved), marker)
+	if index <= 0 {
+		return ""
+	}
+	prefix := filepath.FromSlash(resolved[:index])
+	if !filepath.IsAbs(prefix) {
+		return ""
+	}
+	return prefix
+}
+
 func installedTool(tool string) (path, version string) {
 	path, _ = exec.LookPath(tool)
 	if path == "" && tool == "hermes" {
@@ -1332,12 +1372,21 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 		"old_version": oldVersion,
 		"old_path":    oldPath,
 	}
-	// OpenCode supports several official installation methods (curl, npm,
-	// pnpm, bun, brew, choco and scoop). Running npm unconditionally can
-	// install a second copy while the command on PATH remains the old curl or
-	// brew binary. Let OpenCode detect and upgrade its own installation.
+	// OpenCode supports several official installation methods. Its own method
+	// detector classifies every ~/.local/bin executable as a curl install,
+	// including npm's common ~/.local/bin/opencode symlink. Resolve that
+	// symlink first: npm installs use npm directly at the symlink's own prefix;
+	// all other methods stay with OpenCode's native updater so we do not create
+	// a second installation.
+	npmPrefix := ""
 	if p.Tool == "opencode" && p.Action == "upgrade" && oldPath != "" {
-		return a.handleUpgradeOpenCode(result, oldPath, oldVersion, p.Version)
+		method := openCodeInstallMethod(oldPath)
+		result["install_method"] = method
+		if method != "npm" {
+			return a.handleUpgradeOpenCode(result, oldPath, oldVersion, p.Version, method)
+		}
+		npmPrefix = openCodeNpmPrefix(oldPath)
+		result["npm_prefix"] = npmPrefix
 	}
 	npm, err := exec.LookPath("npm")
 	if err != nil {
@@ -1352,8 +1401,14 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 		if p.Version != "" {
 			packageSpec += "@" + p.Version
 		}
-		// `npm install --global` also upgrades an existing global package.
-		args = []string{"install", "--global", packageSpec}
+		// `npm install --global` also upgrades an existing global package. An
+		// explicit OpenCode prefix updates the package behind the detected
+		// symlink even when another npm/NVM installation is first on PATH.
+		args = []string{"install", "--global"}
+		if npmPrefix != "" {
+			args = append(args, "--prefix", npmPrefix)
+		}
+		args = append(args, packageSpec)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
@@ -1390,10 +1445,13 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 	return result, ""
 }
 
-func (a *Agent) handleUpgradeOpenCode(result map[string]interface{}, path, oldVersion, target string) (map[string]interface{}, string) {
+func (a *Agent) handleUpgradeOpenCode(result map[string]interface{}, path, oldVersion, target, method string) (map[string]interface{}, string) {
 	args := []string{"upgrade"}
 	if target != "" {
 		args = append(args, target)
+	}
+	if method != "" {
+		args = append(args, "--method", method)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()

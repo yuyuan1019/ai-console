@@ -2,13 +2,12 @@
 
 ## 安装与升级
 
-AI Console 安装未部署的 OpenCode 时使用官方 npm 包 `opencode-ai`。升级已安装的 OpenCode 时不强制使用 npm，而是调用：
+AI Console 安装未部署的 OpenCode 时使用官方 npm 包 `opencode-ai`。升级时会先解析当前 `opencode` 命令及其软链接：
 
-```bash
-opencode upgrade <目标版本>
-```
+- npm 安装（包括 `~/.local/bin/opencode` 指向全局 `node_modules/opencode-ai` 的情况）使用 `npm install --global opencode-ai@<目标版本>` 原位升级。
+- curl、pnpm、bun、brew、choco 或 scoop 安装调用 `opencode upgrade <目标版本> --method <安装方式>`。
 
-OpenCode 会识别原有的 curl、npm、pnpm、bun、brew、choco 或 scoop 安装方式并通过对应渠道升级，避免产生两份安装或 PATH 继续指向旧版本。升级结束后，Agent 会重新执行 `opencode --version`；实际版本与目标版本不一致时任务会标记为失败。该行为需要 AI Console Agent `v2.0.4` 或更高版本。
+显式识别安装方式可以避免 OpenCode 将 `~/.local/bin` 下的 npm 软链接误判成 curl 安装，进而把新版装到其他目录而 PATH 仍指向旧版本。升级结束后，Agent 会重新执行 `opencode --version`；实际版本与目标版本不一致时任务会标记为失败。该行为需要 AI Console Agent `v2.0.5` 或更高版本。
 
 ## 配置文件
 
