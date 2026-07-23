@@ -24,6 +24,7 @@ AI Console solves this: deploy one console + install a lightweight agent on each
 | 凭据安全下发 | Push API keys to target machines (AES-256-GCM encrypted) |
 | 供应商与模型管理 | Centralize API providers, keys, and model catalogs |
 | 批量操作 | Apply config changes to multiple servers with dry-run preview |
+| CLI 生命周期管理 | Remotely detect, install, upgrade, and uninstall supported CLI tools |
 | OpenCode / Pi 多渠道下发 | Deploy multiple provider keys into one opencode.json or pi models.json for easy switching |
 | 供应商默认模型 | Set a default model per provider, auto-selected in config generation |
 | 操作审计 | Full audit trail with request ID correlation |
@@ -82,6 +83,19 @@ TOKEN='<Token>' SERVER='https://你的控制台地址' \
 Agent 自动注册为 systemd (Linux) 或 launchd (macOS) 服务，进程常驻、断线自动重连。
 Installs as a systemd (Linux) or launchd (macOS) service with auto-reconnect.
 
+### 升级已有部署 / Upgrade an existing deployment
+
+控制台、Web 前端和 Agent 安装包都构建在 Docker 镜像中，因此拉取代码后必须重新构建镜像，不能只重启旧容器：
+
+```bash
+git pull
+docker compose up -d --build
+```
+
+镜像更新完成后，在服务器详情页先将目标机器的 Agent 升级到“最新”，再升级机器上的 CLI 工具。OpenCode 原生升级支持需要 Agent `v2.0.4` 或更高版本。
+
+The console, web app, and Agent binaries are baked into the Docker image. Rebuild the image after pulling changes, then upgrade managed Agents from the server detail page before managing CLI versions. Native OpenCode upgrades require Agent `v2.0.4` or newer.
+
 ## 支持的工具 / Supported CLI Tools
 
 | 工具 / Tool | 配置文件 / Config | 凭据 / Credential |
@@ -91,6 +105,7 @@ Installs as a systemd (Linux) or launchd (macOS) service with auto-reconnect.
 | Gemini CLI | `~/.gemini/settings.json` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
 | OpenCode | `~/.config/opencode/opencode.json` | provider `apiKey` / `baseURL` |
 | Pi | `~/.pi/agent/models.json` | provider `apiKey` / `baseURL` (inline in config) |
+| Hermes Agent | `~/.hermes/config.yaml` | provider `api_key` (inline in config) |
 
 ## Agent 支持的操作 / Agent Actions
 
@@ -104,8 +119,18 @@ Installs as a systemd (Linux) or launchd (macOS) service with auto-reconnect.
 | `set_credential` | 下发 API Key 到凭据文件 / Push API key |
 | `remove_credential` | 清除凭据及配置 / Remove credential |
 | `run_test` | 发送测试 prompt 验证连通性 / Test connectivity |
-| `upgrade_tool` | 升级 CLI 工具 / Upgrade CLI tool |
+| `manage_tool` | 安装、升级或卸载 CLI 工具 / Install, upgrade, or uninstall a CLI tool |
+| `upgrade_tool` | 旧控制台升级任务的兼容入口 / Legacy upgrade-task compatibility |
 | `upgrade_agent` | 拉取最新 Agent 并重启 / Self-upgrade agent |
+
+### CLI 安装与升级策略 / CLI Lifecycle Strategy
+
+- Codex、Claude、Gemini 和 Pi 使用固定白名单中的 npm 包执行全局安装、升级和卸载；任务不能指定任意包名。
+- OpenCode 升级调用已安装命令的 `opencode upgrade <version>`，由 OpenCode 自己识别 curl、npm、pnpm、bun、brew、choco 或 scoop 安装方式，避免 npm 另装一份后 PATH 仍指向旧版本。
+- Hermes 使用官方安装脚本以及 `hermes update/uninstall` 命令，不使用同名的非官方 npm 包。
+- 安装或升级结束后，Agent 会重新执行 `<tool> --version`。实际版本与目标版本不一致时任务失败，不会在控制台中误报成功。
+
+Codex, Claude, Gemini, and Pi use allowlisted npm packages. OpenCode delegates upgrades to its native updater so the original installation method is preserved. Hermes uses its official lifecycle commands. Every install or upgrade is verified against the version reported by the resulting executable.
 
 ## 技术栈 / Tech Stack
 

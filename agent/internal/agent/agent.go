@@ -1267,6 +1267,15 @@ var npmToolPackages = map[string]string{
 }
 
 var npmVersionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+var semverTokenRe = regexp.MustCompile(`(?i)v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)`)
+
+func canonicalSemver(value string) (string, bool) {
+	match := semverTokenRe.FindStringSubmatch(strings.TrimSpace(value))
+	if len(match) != 2 {
+		return "", false
+	}
+	return strings.ToLower(match[1]), true
+}
 
 func installedTool(tool string) (path, version string) {
 	path, _ = exec.LookPath(tool)
@@ -1323,6 +1332,13 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 		"old_version": oldVersion,
 		"old_path":    oldPath,
 	}
+	// OpenCode supports several official installation methods (curl, npm,
+	// pnpm, bun, brew, choco and scoop). Running npm unconditionally can
+	// install a second copy while the command on PATH remains the old curl or
+	// brew binary. Let OpenCode detect and upgrade its own installation.
+	if p.Tool == "opencode" && p.Action == "upgrade" && oldPath != "" {
+		return a.handleUpgradeOpenCode(result, oldPath, oldVersion, p.Version)
+	}
 	npm, err := exec.LookPath("npm")
 	if err != nil {
 		return result, "npm was not found in the agent PATH; install Node.js/npm first"
@@ -1359,6 +1375,56 @@ func (a *Agent) handleManageTool(payload []byte) (map[string]interface{}, string
 	result["output_bytes"] = len(output)
 	if p.Action == "uninstall" && path != "" {
 		result["note"] = "npm removed its global package, but a command with this name remains on PATH"
+	}
+	if p.Action != "uninstall" {
+		if path == "" {
+			return result, fmt.Sprintf("npm %s completed, but %s was not found on the agent PATH", p.Action, p.Tool)
+		}
+		if requested, ok := canonicalSemver(p.Version); ok {
+			actual, actualOK := canonicalSemver(version)
+			if !actualOK || actual != requested {
+				return result, fmt.Sprintf("npm %s completed, but %s reports version %q instead of %q", p.Action, p.Tool, version, p.Version)
+			}
+		}
+	}
+	return result, ""
+}
+
+func (a *Agent) handleUpgradeOpenCode(result map[string]interface{}, path, oldVersion, target string) (map[string]interface{}, string) {
+	args := []string{"upgrade"}
+	if target != "" {
+		args = append(args, target)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path, args...)
+	output, runErr := cmd.CombinedOutput()
+	result["method"] = "opencode upgrade"
+	result["output_bytes"] = len(output)
+	if ctx.Err() == context.DeadlineExceeded {
+		return result, "OpenCode upgrade timed out after 10 minutes"
+	}
+	if runErr != nil {
+		// OpenCode output can include package-manager configuration. Keep the
+		// task result redacted and expose only the process error.
+		return result, fmt.Sprintf("OpenCode upgrade failed: %v", runErr)
+	}
+
+	newPath, newVersion := installedTool("opencode")
+	result["installed"] = newPath != ""
+	result["path"] = newPath
+	result["new_version"] = newVersion
+	if newPath == "" {
+		return result, "OpenCode upgrade completed, but opencode was no longer found on the agent PATH"
+	}
+	// OpenCode's upgrade command currently catches some package-manager
+	// failures and can still exit zero. Verify the requested version instead
+	// of reporting a false success to the console.
+	if requested, ok := canonicalSemver(target); ok {
+		actual, actualOK := canonicalSemver(newVersion)
+		if !actualOK || actual != requested {
+			return result, fmt.Sprintf("OpenCode upgrade did not reach %q; command still reports %q (was %q)", target, newVersion, oldVersion)
+		}
 	}
 	return result, ""
 }
