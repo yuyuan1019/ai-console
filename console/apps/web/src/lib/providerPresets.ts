@@ -1,7 +1,8 @@
 // 常用供应商预设：点一下填 API key 即可用，免去手填 base_url / api_format / family。
 //
 // 约定（与 core/config.ts 的 withOpenAiV1 / normUrl 对齐）：
-//   * baseUrl 存「根路径」，不带尾 /v1 —— 配置下发时 withOpenAiV1 会按需补 /v1。
+//   * baseUrl 存「根路径」，不带尾 /v1 —— 配置下发时 withOpenAiV1 会按需补 /v1
+//     （URL 已含版本段 /vN 如智谱 /paas/v4、火山 /api/v3 时则保持原样）。
 //   * modelsEndpoint 是完整路径，refresh models 时直接拼 baseUrl + modelsEndpoint。
 //   * family 决定该 key 走哪个工具族（codex=OpenAI 兼容 / claude / gemini）。
 //   * apiFormat：openai_responses | anthropic | gemini | null(null→openai-completions，
@@ -146,12 +147,12 @@ export const PROVIDER_PRESETS: ProviderPreset[] = [
   {
     key: "zhipu",
     name: "智谱 GLM",
-    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
+    baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
     modelsEndpoint: "/models",
     family: "codex",
     apiFormat: null,
     region: "国内",
-    description: "GLM-4 系列",
+    description: "GLM-4.5 / GLM-4.6 编程套餐",
     docsUrl: "https://open.bigmodel.cn/usercenter/apikeys",
   },
   {

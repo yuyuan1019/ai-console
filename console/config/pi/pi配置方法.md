@@ -26,7 +26,7 @@ Pi 的 `api` 字段由供应商 Key 的 `api_format` 派生：
 | `openai_responses` | `openai-responses` |
 | `""`（默认）/其他 | `openai-completions`（pi 标注 most compatible，适合中转/代理） |
 
-`baseUrl` 统一经 `withOpenAiV1` 规整（保证以 `/v1` 结尾、去多余斜杠），与 opencode 一致。
+`baseUrl` 统一经 `withOpenAiV1` 规整：根路径补 `/v1`；已含版本段 `/vN`（如智谱 `/paas/v4`、火山 `/api/v3`）则保持原样；并去多余尾斜杠。与 opencode 一致。
 
 ## 单渠道示例
 

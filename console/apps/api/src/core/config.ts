@@ -20,7 +20,11 @@ export function normUrl(value: string | null | undefined): string {
 export function withOpenAiV1(value: string | null | undefined): string {
   const base = String(value || "").trim().replace(/\/+$/, "")
   if (!base) return ""
-  return /\/v1$/i.test(base) ? base : `${base}/v1`
+  // ponytail: URL 已含版本段（/v1、/v2、/v3、/v4…）时保持原样，不再补 /v1。
+  // 智谱 GLM 编程套餐是 /api/coding/paas/v4、火山方舟是 /api/v3，它们的 OpenAI
+  // 兼容端点直接挂在版本段下（…/v4/chat/completions），补 /v1 会拼出 …/v4/v1/…
+  // 导致 404。其余根路径（如 api.openai.com）按惯例补 /v1。
+  return /\/v\d+$/i.test(base) ? base : `${base}/v1`
 }
 
 export function safeJson(value: unknown): any {
