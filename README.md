@@ -120,7 +120,6 @@ The console, web app, and Agent binaries are baked into the Docker image. Rebuil
 | `detect_tools` | 探测已装 CLI 工具及版本 / Probe installed tools |
 | `set_credential` | 下发 API Key 到凭据文件 / Push API key |
 | `remove_credential` | 清除凭据及配置 / Remove credential |
-| `run_test` | 发送测试 prompt 验证连通性 / Test connectivity |
 | `manage_tool` | 安装、升级或卸载 CLI 工具 / Install, upgrade, or uninstall a CLI tool |
 | `upgrade_tool` | 旧控制台升级任务的兼容入口 / Legacy upgrade-task compatibility |
 | `upgrade_agent` | 拉取最新 Agent 并重启 / Self-upgrade agent |
