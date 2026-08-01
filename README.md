@@ -1,18 +1,18 @@
 # AI Console
 
-统一管理多台服务器上 AI 编码工具（Codex CLI、Claude Code、Gemini CLI、OpenCode、Pi）配置与凭据的中心化 Web 控制台。
+统一管理多台服务器上 AI 编码工具（Codex CLI、Claude Code、Gemini CLI、OpenCode、Pi、Hermes）配置与凭据的中心化 Web 控制台。
 
-A centralized web control panel for managing AI coding CLI tools (Codex CLI, Claude Code, Gemini CLI, OpenCode, Pi) across multiple remote Linux/macOS servers.
+A centralized web control panel for managing AI coding CLI tools (Codex CLI, Claude Code, Gemini CLI, OpenCode, Pi, Hermes) across multiple remote Linux/macOS servers.
 
 ---
 
 ## 做什么的 / What It Does
 
-团队里每个人、每台开发机上都有 Codex / Claude / Gemini / OpenCode / Pi 这些 AI 编码工具，每台机器的配置和 API Key 各不一样。如果要换一个模型、切一个中转站、或者批量更新一批机器的 Key，就得一台一台 SSH 上去改配置。
+团队里每个人、每台开发机上都有 Codex / Claude / Gemini / OpenCode / Pi / Hermes 这些 AI 编码工具，每台机器的配置和 API Key 各不一样。如果要换一个模型、切一个中转站、或者批量更新一批机器的 Key，就得一台一台 SSH 上去改配置。
 
 AI Console 解决的就是这个问题：一台控制台 + 每台开发机一个轻量 Agent → Web 界面统一管理所有机器上这些工具的配置、凭据和模型配置下发。
 
-Every developer and every machine in a team runs AI coding tools like Codex, Claude, Gemini, OpenCode, or Pi — each with its own config and API keys. Changing a model, switching a relay, or rotating keys means SSH-ing into each machine one by one.
+Every developer and every machine in a team runs AI coding tools like Codex, Claude, Gemini, OpenCode, Pi, or Hermes — each with its own config and API keys. Changing a model, switching a relay, or rotating keys means SSH-ing into each machine one by one.
 
 AI Console solves this: deploy one console + install a lightweight agent on each dev machine → manage all CLI tool configs, credentials, and model configuration rollout from a single web dashboard. No SSH required.
 
@@ -43,7 +43,7 @@ AI Console solves this: deploy one console + install a lightweight agent on each
                      │              │              │
             Codex/Claude/     Codex/Claude/     Codex/Claude/
             Gemini/OpenCode/  Gemini/OpenCode/  Gemini/OpenCode/
-            Pi                Pi                Pi
+            Pi/Hermes         Pi/Hermes         Pi/Hermes
 ```
 
 - **控制台 / Console**：Node.js + TypeScript + Fastify，React SPA 前端，SQLite 数据库
@@ -55,19 +55,21 @@ AI Console solves this: deploy one console + install a lightweight agent on each
 ### 1. 拉代码 / Clone
 
 ```bash
-git clone https://github.com/your-org/ai-console.git
+git clone https://github.com/yuyuan1019/ai-console.git
 cd ai-console
 ```
 
 ### 2. 启动 / Start
 
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
 访问 `http://你的服务器IP:15150`，用 `admin` / `admin` 登录。
 
 Open `http://your-server-ip:15150` and log in with `admin` / `admin`.
+
+> 宿主端口 `15150` → 容器 `3000`。SQLite 数据库存放在 Docker volume `ai-console-data`（容器内 `/app/console/data/`），重建容器不会丢数据。
 
 > **:warning: 默认密码仅用于内网测试。部署到公网前，请修改 `.env` 中 `BOOTSTRAP_ADMIN_PASS`，并取消 `NODE_ENV`、`MASTER_KEY`、`JWT_SECRET` 的注释设为强随机值。**
 > :warning: **Default credentials are for LAN testing only. Before exposing to the internet, change `BOOTSTRAP_ADMIN_PASS` in `.env` and uncomment `NODE_ENV` / `MASTER_KEY` / `JWT_SECRET` with strong random values.**
@@ -84,6 +86,12 @@ TOKEN='<Token>' SERVER='https://你的控制台地址' \
 Agent 自动注册为 systemd (Linux) 或 launchd (macOS) 服务，进程常驻、断线自动重连。
 Installs as a systemd (Linux) or launchd (macOS) service with auto-reconnect.
 
+卸载 Agent / Uninstall:
+
+```bash
+sh -c "$(curl -fsSL 'https://你的控制台地址/agent/uninstall.sh')"
+```
+
 ### 升级已有部署 / Upgrade an existing deployment
 
 控制台、Web 前端和 Agent 安装包都构建在 Docker 镜像中，因此拉取代码后必须重新构建镜像，不能只重启旧容器：
@@ -97,16 +105,45 @@ docker compose up -d --build
 
 The console, web app, and Agent binaries are baked into the Docker image. Rebuild the image after pulling changes, then upgrade managed Agents from the server detail page before managing CLI versions. Multi-method OpenCode upgrades require Agent `v2.0.5` or newer.
 
+## 本地开发 / Local Development
+
+```bash
+# Console API（Fastify + tsx 直跑 TypeScript，监听 :3000）
+cd console/apps/api && npm install && npm run dev
+
+# Web 前端（Vite dev server，/api 与 /agent 代理到 :3000）
+cd console/apps/web && npm install && npm run dev
+
+# Web 生产构建（tsc 类型检查 + vite build → dist/，由 API 的 SPA fallback 提供）
+cd console/apps/web && npm run build
+
+# Agent 交叉编译 linux/darwin × amd64/arm64 → console/agent-dist/（需 Go ≥ 1.23）
+cd agent && bash build-dist.sh
+```
+
 ## 支持的工具 / Supported CLI Tools
 
 | 工具 / Tool | 配置文件 / Config | 凭据 / Credential |
 |---|---|---|
 | Codex CLI | `~/.codex/config.toml` | API Key：`~/.codex/auth.json`；订阅登录：完整 `auth.json` |
-| Claude Code | `~/.claude/settings.json` | API Key 环境配置；订阅登录：`~/.claude/.credentials.json` |
-| Gemini CLI | `~/.gemini/settings.json` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| Claude Code | `~/.claude/settings.json` | API Key：`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`（`creds/claude.sh`）；订阅登录：`~/.claude/.credentials.json` |
+| Gemini CLI | `~/.gemini/settings.json` | `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL` |
 | OpenCode | `~/.config/opencode/opencode.json` | provider `apiKey` / `baseURL` |
 | Pi | `~/.pi/agent/models.json` | provider `apiKey` / `baseURL` (inline in config) |
 | Hermes Agent | `~/.hermes/config.yaml` | provider `api_key` (inline in config) |
+
+## 配置说明文档 / Config Docs
+
+各工具的配置与凭据格式说明（`console/config/<tool>/`，人工维护的规格文档）：
+
+| 工具 / Tool | 文档 / Doc |
+|---|---|
+| Codex CLI | [codex配置.md](console/config/codex/codex配置.md) |
+| Claude Code | [claude配置方法.md](console/config/claude%20code/claude配置方法.md) |
+| Gemini CLI | [gemini配置方法.md](console/config/gemini/gemini配置方法.md) |
+| OpenCode | [opencode配置方法.md](console/config/opencode/opencode配置方法.md) |
+| Pi | [pi配置方法.md](console/config/pi/pi配置方法.md) |
+| Hermes | [hermes配置方法.md](console/config/hermes/hermes配置方法.md) |
 
 ## Agent 支持的操作 / Agent Actions
 
@@ -165,6 +202,8 @@ First sign in normally on one managed source machine, then import its credential
 | `MASTER_KEY` | 生产环境 / Production | API Key 加密主密钥 / Encryption master key |
 | `JWT_SECRET` | 生产环境 / Production | JWT 签名密钥 / Signing secret |
 | `NODE_ENV` | 生产环境设为 `production` | 开启安全校验，强制自定义密钥 |
+| `PORT` | 否 / No | API 监听端口，默认 `3000`（Docker 映射宿主 `15150`） |
+| `DB_PATH` | 否 / No | SQLite 文件路径，默认 `console/data/ai-console.db` |
 | `GITHUB_TOKEN` | 可选 / Optional | 私有仓库 Agent 代理 / Private repo agent proxy |
 
 详见 `.env` / See `.env`
