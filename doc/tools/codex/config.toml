@@ -1,14 +1,19 @@
-model_provider = "OpenAI"
+# 样例：providerId 由供应商名派生且统一小写（"OpenAI" → "openai"）。
+# AI Console 生成/改写的字段：model / model_reasoning_effort("medium") / model_provider /
+# [model_providers.*] 的 name / base_url / wire_api("responses") / requires_openai_auth。
+# 其余字段（review_model / disable_response_storage / network_access / [features] 等）
+# 为用户自有配置：raw 导入时控制台原样保留，不会改写。
+model_provider = "openai"
 model = "gpt-5.5"
 review_model = "gpt-5.5"
-model_reasoning_effort = "xhigh"
+model_reasoning_effort = "medium"
 disable_response_storage = true
 network_access = "enabled"
 windows_wsl_setup_acknowledged = true
 
-[model_providers.OpenAI]
+[model_providers.openai]
 name = "OpenAI"
-base_url = "xxxx"
+base_url = "https://your-relay.example.com/v1"
 wire_api = "responses"
 requires_openai_auth = true
 

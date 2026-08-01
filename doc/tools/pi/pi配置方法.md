@@ -26,7 +26,7 @@ Pi 的 `api` 字段由供应商 Key 的 `api_format` 派生：
 | `openai_responses` | `openai-responses` |
 | `""`（默认）/其他 | `openai-completions`（pi 标注 most compatible，适合中转/代理） |
 
-`baseUrl` 统一经 `withOpenAiV1` 规整：根路径补 `/v1`；已含版本段 `/vN`（如智谱 `/paas/v4`、火山 `/api/v3`）则保持原样；并去多余尾斜杠。与 opencode 一致。
+`baseUrl` 仅在 `openai-completions` / `openai-responses` 两种协议下经 `withOpenAiV1` 规整（根路径补 `/v1`；已含版本段 `/vN` 如智谱 `/paas/v4`、火山 `/api/v3` 则保持原样；去多余尾斜杠）。`anthropic-messages` / `google-generative-ai` **保留原始 baseUrl**——pi 客户端会自己拼 `/v1/messages`、`/v1beta/...`，与 opencode（baseURL 一律补 `/v1`）不同。
 
 ## 单渠道示例
 
@@ -34,7 +34,7 @@ Pi 的 `api` 字段由供应商 Key 的 `api_format` 派生：
 {
   "providers": {
     "packycode": {
-      "baseUrl": "https://www.packyapi.com/v1",
+      "baseUrl": "https://www.packyapi.com",
       "api": "anthropic-messages",
       "apiKey": "sk-xxxx",
       "models": [
@@ -54,7 +54,7 @@ provider key 按供应商名+分组派生 `providerId`（小写、非字母数�
 {
   "providers": {
     "packycode": {
-      "baseUrl": "https://www.packyapi.com/v1",
+      "baseUrl": "https://www.packyapi.com",
       "api": "anthropic-messages",
       "apiKey": "sk-aaaa",
       "models": [{ "id": "claude-sonnet-4-20250514", "name": "claude-sonnet-4-20250514" }]

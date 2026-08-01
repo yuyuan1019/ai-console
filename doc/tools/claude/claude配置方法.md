@@ -10,9 +10,12 @@ AI Console 将 API Key 与端点写入 `~/.claude/settings.json` 的 `env` 块�
     "ANTHROPIC_BASE_URL": "https://your-relay.example.com",
     "ANTHROPIC_AUTH_TOKEN": "sk-xxx",
     "ANTHROPIC_MODEL": "claude-sonnet-4-6"
-  }
+  },
+  "effortLevel": "medium"
 }
 ```
+
+> 说明：AI Console 生成 `settings.json` 时还会写入顶层 `effortLevel: "medium"`（若用户未自行设置）。
 
 ## Anthropic 订阅账户登录
 
