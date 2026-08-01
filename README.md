@@ -88,7 +88,6 @@ cd agent && bash build-dist.sh                      # 交叉编译 linux/darwin 
 | `NODE_ENV` | 生产 | 设为 `production` 强制安全校验 |
 | `PORT` | 否 | API 端口，默认 `3000`（Docker 映射宿主 `15150`） |
 | `DB_PATH` | 否 | SQLite 路径，默认 `console/data/ai-console.db` |
-| `GITHUB_TOKEN` | 可选 | 私有仓库 Agent 二进制代理 |
 
 详见 `.env`。
 

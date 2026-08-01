@@ -88,7 +88,6 @@ cd agent && bash build-dist.sh                      # cross-compile linux/darwin
 | `NODE_ENV` | Production | Set to `production` to enforce security checks |
 | `PORT` | No | API port (default `3000`; Docker maps host `15150`) |
 | `DB_PATH` | No | SQLite path (default `console/data/ai-console.db`) |
-| `GITHUB_TOKEN` | Optional | GitHub token for private-repo agent binary proxy |
 
 See `.env` for details.
 
