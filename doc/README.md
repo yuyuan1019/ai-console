@@ -20,4 +20,5 @@ AI Console 的文档集中存放于此，按类别组织。
 ## 仓库指引 / Repo Guidance
 
 - [AGENTS.md](../AGENTS.md) — 仓库结构、架构、交付链路与关键陷阱
-- [README.md](../README.md) — 项目介绍与快速开始
+- [README.md](../README.md) — 项目介绍与快速开始（中文版 / Chinese）
+- [README.en.md](../README.en.md) — Project intro & quick start (English / 英文版)
