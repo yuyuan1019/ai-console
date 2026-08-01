@@ -1,186 +1,71 @@
 # AI Console
 
-统一管理多台服务器上 AI 编码工具（Codex CLI、Claude Code、Gemini CLI、OpenCode、Pi、Hermes）配置与凭据的中心化 Web 控制台。
+统一管理多台 Linux/macOS 开发机上 AI 编码 CLI 工具（Codex CLI、Claude Code、Gemini CLI、OpenCode、Pi、Hermes）的配置、凭据与模型下发的中心化 Web 控制台，无需 SSH。
 
-A centralized web control panel for managing AI coding CLI tools (Codex CLI, Claude Code, Gemini CLI, OpenCode, Pi, Hermes) across multiple remote Linux/macOS servers.
+A centralized web console + lightweight outbound agent for managing AI coding CLI configs, credentials, and model rollout across machines — no SSH.
 
----
-
-## 做什么的 / What It Does
-
-团队里每个人、每台开发机上都有 Codex / Claude / Gemini / OpenCode / Pi / Hermes 这些 AI 编码工具，每台机器的配置和 API Key 各不一样。如果要换一个模型、切一个中转站、或者批量更新一批机器的 Key，就得一台一台 SSH 上去改配置。
-
-AI Console 解决的就是这个问题：一台控制台 + 每台开发机一个轻量 Agent → Web 界面统一管理所有机器上这些工具的配置、凭据和模型配置下发。
-
-Every developer and every machine in a team runs AI coding tools like Codex, Claude, Gemini, OpenCode, Pi, or Hermes — each with its own config and API keys. Changing a model, switching a relay, or rotating keys means SSH-ing into each machine one by one.
-
-AI Console solves this: deploy one console + install a lightweight agent on each dev machine → manage all CLI tool configs, credentials, and model configuration rollout from a single web dashboard. No SSH required.
-
-## 核心能力 / Features
+## 功能特性 / Features
 
 | 中文 | English |
 |---|---|
-| 配置读写与回滚 | Remotely read/write CLI configs with auto-backup and rollback |
-| 凭据安全下发 | Push API keys to target machines (AES-256-GCM encrypted) |
-| 供应商与模型管理 | Centralize API providers, keys, and model catalogs |
-| 批量操作 | Apply config changes to multiple servers with dry-run preview |
-| CLI 生命周期管理 | Remotely detect, install, upgrade, and uninstall supported CLI tools |
-| Codex / Claude 订阅登录 | Import an existing account login from one managed machine and securely deploy it to others |
-| OpenCode / Pi 多渠道下发 | Deploy multiple provider keys into one opencode.json or pi models.json for easy switching |
-| 供应商默认模型 | Set a default model per provider, auto-selected in config generation |
+| 配置读写与回滚 | Remote config read/write with auto-backup and rollback |
+| 凭据安全下发 | Push API keys encrypted with AES-256-GCM |
+| 供应商与模型管理 | Centralized providers, keys, and model catalogs |
+| 批量操作 | Batch rollout with dry-run preview and rollback |
+| CLI 生命周期管理 | Remote detect / install / upgrade / uninstall CLI tools |
+| 订阅账户登录 | Import Codex/Claude subscription login and deploy it to other machines |
+| OpenCode / Pi 多渠道下发 | Merge multiple provider keys into one opencode.json / pi models.json |
 | 操作审计 | Full audit trail with request ID correlation |
 
-## 架构 / Architecture
-
-```
-浏览器 / Browser ─── HTTPS ─── 控制台 / Console (Node.js + SQLite)
-                                    │
-                     ┌──────────────┼──────────────┐
-                     │              │              │
-                 WebSocket      WebSocket      WebSocket
-                     │              │              │
-                Agent@开发机1   Agent@开发机2   Agent@macOS
-                     │              │              │
-            Codex/Claude/     Codex/Claude/     Codex/Claude/
-            Gemini/OpenCode/  Gemini/OpenCode/  Gemini/OpenCode/
-            Pi/Hermes         Pi/Hermes         Pi/Hermes
-```
-
-- **控制台 / Console**：Node.js + TypeScript + Fastify，React SPA 前端，SQLite 数据库
-- **Agent**：Go 编译的单文件守护进程，WebSocket 主动外连 + REST 降级
-- **无需 SSH** — Agent 主动连接控制台，无需开放被管机入站端口 / Agent connects outbound, no inbound ports needed on managed machines
-
-## 快速部署 / Quick Start
-
-### 1. 拉代码 / Clone
+## 快速开始 / Quick Start
 
 ```bash
 git clone https://github.com/yuyuan1019/ai-console.git
 cd ai-console
-```
-
-### 2. 启动 / Start
-
-```bash
 docker compose up -d --build
 ```
 
-访问 `http://你的服务器IP:15150`，用 `admin` / `admin` 登录。
+- 访问 `http://你的服务器IP:15150`，默认账号 `admin` / `admin`（仅限内网测试；公网部署前请在 `.env` 设置强随机的 `BOOTSTRAP_ADMIN_PASS` / `MASTER_KEY` / `JWT_SECRET` 并开启 `NODE_ENV=production`）。
+- 数据存于 Docker volume `ai-console-data`（容器内 `/app/console/data/`），重建容器不丢数据。
 
-Open `http://your-server-ip:15150` and log in with `admin` / `admin`.
-
-> 宿主端口 `15150` → 容器 `3000`。SQLite 数据库存放在 Docker volume `ai-console-data`（容器内 `/app/console/data/`），重建容器不会丢数据。
-
-> **:warning: 默认密码仅用于内网测试。部署到公网前，请修改 `.env` 中 `BOOTSTRAP_ADMIN_PASS`，并取消 `NODE_ENV`、`MASTER_KEY`、`JWT_SECRET` 的注释设为强随机值。**
-> :warning: **Default credentials are for LAN testing only. Before exposing to the internet, change `BOOTSTRAP_ADMIN_PASS` in `.env` and uncomment `NODE_ENV` / `MASTER_KEY` / `JWT_SECRET` with strong random values.**
-
-### 3. 给开发机安装 Agent / Install agent on managed machines
-
-登录控制台 → **服务器管理** → 生成接入 Token。在目标开发机上执行 / Log in → **Servers** → generate an enroll token, then run:
+给开发机安装 Agent（登录控制台 → 服务器管理 → 生成接入 Token）：
 
 ```bash
 TOKEN='<Token>' SERVER='https://你的控制台地址' \
   sh -c "$(curl -fsSL 'https://你的控制台地址/agent/install.sh')"
 ```
 
-Agent 自动注册为 systemd (Linux) 或 launchd (macOS) 服务，进程常驻、断线自动重连。
-Installs as a systemd (Linux) or launchd (macOS) service with auto-reconnect.
-
-卸载 Agent / Uninstall:
+Agent 注册为 systemd (Linux) / launchd (macOS) 服务并自动重连。卸载：
 
 ```bash
 sh -c "$(curl -fsSL 'https://你的控制台地址/agent/uninstall.sh')"
 ```
 
-### 升级已有部署 / Upgrade an existing deployment
+升级部署：`git pull && docker compose up -d --build`（必须重建镜像，重启旧容器不生效）；之后在服务器详情页先升级 Agent 到“最新”，再管理 CLI 工具。OpenCode 多安装方式升级需 Agent ≥ `v2.0.5`。
 
-控制台、Web 前端和 Agent 安装包都构建在 Docker 镜像中，因此拉取代码后必须重新构建镜像，不能只重启旧容器：
+## 支持的工具 / Supported Tools
 
-```bash
-git pull
-docker compose up -d --build
-```
+| 工具 / Tool | 配置 / Config | 凭据 / Credential |
+|---|---|---|
+| Codex CLI | `~/.codex/config.toml` | `~/.codex/auth.json`；订阅登录：完整 `auth.json` |
+| Claude Code | `~/.claude/settings.json` | `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`；订阅登录：`~/.claude/.credentials.json` |
+| Gemini CLI | `~/.gemini/settings.json` | `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL` |
+| OpenCode | `~/.config/opencode/opencode.json` | provider `apiKey` / `baseURL` |
+| Pi | `~/.pi/agent/models.json` | provider `apiKey` / `baseURL`（内联） |
+| Hermes | `~/.hermes/config.yaml` | provider `api_key`（内联） |
 
-镜像更新完成后，在服务器详情页先将目标机器的 Agent 升级到“最新”，再升级机器上的 CLI 工具。OpenCode 多安装方式升级支持需要 Agent `v2.0.5` 或更高版本。
+Codex、Claude、Gemini、Pi 走 npm 白名单安装/升级；OpenCode 按实际安装方式使用 npm 或原生 `opencode upgrade`；Hermes 使用官方安装脚本与 `hermes update/uninstall`。安装/升级后 Agent 会执行 `<tool> --version` 校验实际版本。
 
-The console, web app, and Agent binaries are baked into the Docker image. Rebuild the image after pulling changes, then upgrade managed Agents from the server detail page before managing CLI versions. Multi-method OpenCode upgrades require Agent `v2.0.5` or newer.
+Codex / Claude 订阅登录：先在来源机器执行 `codex login` / `claude auth login`，再到“供应商”页导入；凭据以 AES-256-GCM 密文保存，任务与审计不落明文，目标文件权限 `0600`。需要来源/目标 Agent ≥ `v2.0.6`。
 
 ## 本地开发 / Local Development
 
 ```bash
-# Console API（Fastify + tsx 直跑 TypeScript，监听 :3000）
-cd console/apps/api && npm install && npm run dev
-
-# Web 前端（Vite dev server，/api 与 /agent 代理到 :3000）
-cd console/apps/web && npm install && npm run dev
-
-# Web 生产构建（tsc 类型检查 + vite build → dist/，由 API 的 SPA fallback 提供）
-cd console/apps/web && npm run build
-
-# Agent 交叉编译 linux/darwin × amd64/arm64 → console/agent-dist/（需 Go ≥ 1.23）
-cd agent && bash build-dist.sh
+cd console/apps/api && npm install && npm run dev   # API :3000（tsx 直跑）
+cd console/apps/web && npm install && npm run dev   # Vite dev，/api 与 /agent 代理到 :3000
+cd console/apps/web && npm run build                # tsc + vite build → dist/
+cd agent && bash build-dist.sh                      # 交叉编译 linux/darwin × amd64/arm64（Go ≥ 1.23）
 ```
-
-## 支持的工具 / Supported CLI Tools
-
-| 工具 / Tool | 配置文件 / Config | 凭据 / Credential |
-|---|---|---|
-| Codex CLI | `~/.codex/config.toml` | API Key：`~/.codex/auth.json`；订阅登录：完整 `auth.json` |
-| Claude Code | `~/.claude/settings.json` | API Key：`ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`（`creds/claude.sh`）；订阅登录：`~/.claude/.credentials.json` |
-| Gemini CLI | `~/.gemini/settings.json` | `GEMINI_API_KEY` / `GOOGLE_GEMINI_BASE_URL` |
-| OpenCode | `~/.config/opencode/opencode.json` | provider `apiKey` / `baseURL` |
-| Pi | `~/.pi/agent/models.json` | provider `apiKey` / `baseURL` (inline in config) |
-| Hermes Agent | `~/.hermes/config.yaml` | provider `api_key` (inline in config) |
-
-## 配置说明文档 / Config Docs
-
-各工具的配置与凭据格式说明（`console/config/<tool>/`，人工维护的规格文档）：
-
-| 工具 / Tool | 文档 / Doc |
-|---|---|
-| Codex CLI | [codex配置.md](console/config/codex/codex配置.md) |
-| Claude Code | [claude配置方法.md](console/config/claude%20code/claude配置方法.md) |
-| Gemini CLI | [gemini配置方法.md](console/config/gemini/gemini配置方法.md) |
-| OpenCode | [opencode配置方法.md](console/config/opencode/opencode配置方法.md) |
-| Pi | [pi配置方法.md](console/config/pi/pi配置方法.md) |
-| Hermes | [hermes配置方法.md](console/config/hermes/hermes配置方法.md) |
-
-## Agent 支持的操作 / Agent Actions
-
-| 操作 / Action | 说明 / Description |
-|---|---|
-| `read_config` | 读取配置 / Read config file |
-| `read_account_credential` | 从已登录机器导入 Codex/Claude 订阅凭据 / Import an existing subscription login |
-| `write_config` | 写入配置（写前备份）/ Write config (backs up first) |
-| `list_config_backups` | 列出备份 / List backup files |
-| `restore_config_backup` | 恢复备份 / Restore from backup |
-| `detect_tools` | 探测已装 CLI 工具及版本 / Probe installed tools |
-| `set_credential` | 下发 API Key 到凭据文件 / Push API key |
-| `remove_credential` | 清除凭据及配置 / Remove credential |
-| `manage_tool` | 安装、升级或卸载 CLI 工具 / Install, upgrade, or uninstall a CLI tool |
-| `upgrade_tool` | 旧控制台升级任务的兼容入口 / Legacy upgrade-task compatibility |
-| `upgrade_agent` | 拉取最新 Agent 并重启 / Self-upgrade agent |
-
-### CLI 安装与升级策略 / CLI Lifecycle Strategy
-
-- Codex、Claude、Gemini 和 Pi 使用固定白名单中的 npm 包执行全局安装、升级和卸载；任务不能指定任意包名。
-- OpenCode 的 npm 安装通过解析命令软链接识别，并使用 npm 原位升级；curl、pnpm、bun、brew、choco 或 scoop 安装交给 `opencode upgrade <version> --method <方式>`，避免 `~/.local/bin/opencode` 的 npm 软链接被 OpenCode 误判为 curl 安装。
-- Hermes 使用官方安装脚本以及 `hermes update/uninstall` 命令，不使用同名的非官方 npm 包。
-- 安装或升级结束后，Agent 会重新执行 `<tool> --version`。实际版本与目标版本不一致时任务失败，不会在控制台中误报成功。
-
-Codex, Claude, Gemini, and Pi use allowlisted npm packages. OpenCode delegates upgrades to its native updater so the original installation method is preserved. Hermes uses its official lifecycle commands. Every install or upgrade is verified against the version reported by the resulting executable.
-
-### 订阅账户登录 / Subscription Account Login
-
-1. 先在一台已接入的来源机器上正常执行 `codex login` 或 `claude auth login`。
-2. 在“供应商”页面点击“新增”，选择 OpenAI 或 Anthropic，再选择“Codex 订阅登录”或“Claude 订阅登录”及来源服务器。控制台会先读取登录信息；若来源机器尚未登录，页面会提示对应登录命令，完成后可点击“重新读取”。
-3. Agent 读取 `~/.codex/auth.json` 或 `~/.claude/.credentials.json`（macOS Claude 也支持 Login Keychain），通过 TLS/WebSocket 返回控制台。
-4. 控制台只保存 AES-256-GCM 密文；任务结果和审计日志仅记录指纹，不保存 access/refresh token。
-5. 在单机“凭据下发”或批量下发页面选择该订阅凭据。目标文件写入权限为 `0600`，覆盖前会创建 `0600` 备份。
-
-订阅凭据不会走 API Ping、模型拉取或 Base URL 配置，也不接受账号密码。导入与下发需要来源和目标机器的 Agent 均为 `v2.0.6` 或更高版本。多个机器共用一个订阅刷新令牌可能受 OpenAI/Anthropic 的会话策略与服务条款限制，请仅用于你有权管理的账户和机器。
-
-First sign in normally on one managed source machine, then import its credential from the provider detail page. The console encrypts the complete login document and can deploy it to other managed machines without storing tokens in task or audit plaintext.
 
 ## 技术栈 / Tech Stack
 
@@ -188,10 +73,9 @@ First sign in normally on one managed source machine, then import its credential
 |---|---|
 | 后端 / Backend | Node.js + TypeScript + Fastify 5 |
 | 前端 / Frontend | React 19 + Vite + Tailwind CSS + shadcn/ui |
-| 数据库 / Database | SQLite (WAL mode, migration-managed) |
-| Agent | Go, `gorilla/websocket`, single binary |
-| 加密 / Encryption | AES-256-GCM (API keys at rest) |
-| 认证 / Auth | scrypt 密码哈希, JWT (15min) + httpOnly refresh cookie (7d) |
+| 数据库 / Database | SQLite（WAL，migration 管理） |
+| Agent | Go + `gorilla/websocket`，单文件二进制 |
+| 加密 / 认证 | AES-256-GCM / scrypt + JWT（15min）+ httpOnly refresh cookie（7d） |
 
 ## 环境变量 / Environment Variables
 
@@ -199,14 +83,19 @@ First sign in normally on one managed source machine, then import its credential
 |---|---|---|
 | `BOOTSTRAP_ADMIN_PASS` | 首次启动 / First run | 初始管理员密码 / Initial admin password |
 | `BOOTSTRAP_ADMIN_USER` | 否 / No | 初始用户名，默认 `admin` |
-| `MASTER_KEY` | 生产环境 / Production | API Key 加密主密钥 / Encryption master key |
-| `JWT_SECRET` | 生产环境 / Production | JWT 签名密钥 / Signing secret |
-| `NODE_ENV` | 生产环境设为 `production` | 开启安全校验，强制自定义密钥 |
-| `PORT` | 否 / No | API 监听端口，默认 `3000`（Docker 映射宿主 `15150`） |
-| `DB_PATH` | 否 / No | SQLite 文件路径，默认 `console/data/ai-console.db` |
-| `GITHUB_TOKEN` | 可选 / Optional | 私有仓库 Agent 代理 / Private repo agent proxy |
+| `MASTER_KEY` | 生产 / Production | API Key 加密主密钥 / Encryption master key |
+| `JWT_SECRET` | 生产 / Production | JWT 签名密钥 / Signing secret |
+| `NODE_ENV` | 生产 / Production | 设为 `production` 强制安全校验 |
+| `PORT` | 否 / No | API 端口，默认 `3000`（Docker 映射宿主 `15150`） |
+| `DB_PATH` | 否 / No | SQLite 路径，默认 `console/data/ai-console.db` |
+| `GITHUB_TOKEN` | 可选 / Optional | 私有仓库 Agent 二进制代理 |
 
-详见 `.env` / See `.env`
+详见 `.env` / See `.env`。
+
+## 文档 / Docs
+
+- 工具配置与凭据规格：[doc/tools/](doc/tools/)（codex / claude / gemini / hermes / opencode / pi）
+- 仓库结构与开发指引（AI 助手与开发者共用）：[AGENTS.md](AGENTS.md)
 
 ## License
 

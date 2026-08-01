@@ -88,7 +88,7 @@ Browser ──HTTPS──▶ Console (Node Fastify API + React SPA, SQLite)
 - `console/apps/api/src/` — Fastify API. `server.ts` bootstrap; `core/` shared infra; `middleware/auth.ts` the single auth gate; `modules/<name>/routes.ts` one file per route group.
 - `console/apps/web/src/` — React SPA. `lib/api.ts` the only API client; `lib/ws.ts` browser WS client; `hooks/use*.ts` react-query hooks; `pages/` route components.
 - `console/db/` — `schema.sql` (reference snapshot + fallback) + `migrations/NNN_*.sql` (15 so far) + `seed.cjs`/`verify.cjs`.
-- `console/config/<tool>/` — per-tool config/credential **spec markdown + samples** (human source of truth for delivery).
+- `doc/tools/<tool>/` — per-tool config/credential **spec markdown + samples** (human source of truth for delivery).
 - `console/agent-dist/` — compiled agent binaries + `manifest.json`, served by the API for install and self-upgrade.
 - `agent/internal/agent/agent.go` — the entire agent as one ~800-line file.
 
@@ -143,7 +143,7 @@ Per-tool reality:
 - The `api` field supports four pi-specific protocol values: `openai-completions`, `openai-responses`, `anthropic-messages`, `google-generative-ai`, mapped from the provider key's `api_format`.
 - The `baseUrl` is normalized with `withOpenAiV1` (trailing `/v1`).
 - Scrub on remove overwrites `models.json` with `{ "providers": {} }`.
-Full pi field documentation lives in the pi package's `docs/models.md` and `docs/custom-provider.md`; the `console/config/pi/pi配置方法.md` spec describes the AI Console delivery subset.
+Full pi field documentation lives in the pi package's `docs/models.md` and `docs/custom-provider.md`; the `doc/tools/pi/pi配置方法.md` spec describes the AI Console delivery subset.
 
 ### Reasoning effort (thinking levels) — auto-inferred
 
@@ -156,7 +156,7 @@ Full pi field documentation lives in the pi package's `docs/models.md` and `docs
 
 Conservative by design: only `reasoning:true` is set, never `thinkingLevelMap` → pi/opencode expose `off..high` (xhigh/max hidden, since most relays reject them). To unlock full levels or override per model, that's path B (per-model editable config in the `models` table — not yet implemented).
 
-The `console/config/<tool>/*.md` spec files are the human source of truth but are a **simplified description**, not the literal implementation — e.g. they say env vars go in `~/.bashrc`, but the agent actually writes `creds/<tool>.sh` and sources it; the opencode sample shows rich per-model objects, but `buildOpenCodeConfig` writes each model as `{}` (or `{reasoning:true}` for reasoning-capable models — see "Reasoning effort" below).
+The `doc/tools/<tool>/*.md` spec files are the human source of truth but are a **simplified description**, not the literal implementation — e.g. they say env vars go in `~/.bashrc`, but the agent actually writes `creds/<tool>.sh` and sources it; the opencode sample shows rich per-model objects, but `buildOpenCodeConfig` writes each model as `{}` (or `{reasoning:true}` for reasoning-capable models — see "Reasoning effort" below).
 
 ### Crypto & auth
 
